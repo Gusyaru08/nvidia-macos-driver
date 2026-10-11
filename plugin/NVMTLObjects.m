@@ -1049,39 +1049,48 @@ extern int nvmtl_depthfmt_public(MTLPixelFormat, uint32_t *, uint32_t *);
     g_surfin_copy++; if (r->_vramOn) nvmtl_vram_tag_set(r->_surf, r->_plane, seed);
     static unsigned n; if (n++ < 6 || n % 2000 == 0) nvlog("G13 surface-in #%u: %ux%u surface %p seed %u uploaded", n, r->_i.w, r->_i.h, (void *)r->_surf, seed);
 }
+// VRAM-only publication: the kernel marks the surface's VRAM newest and pages it off on the next CPU lock.
+- (BOOL)nvmtlSurfacePublishVram {
+    if (nvmtl_vk_surface_dirty((uint32_t)IOSurfaceGetID(_surf), (uint32_t)_plane)) return NO;
+    uint32_t seed = IOSurfaceGetSeed(_surf);
+    _surfSeed = seed; _surfSynced = YES;
+    _surfGen = nvmtl_vram_tag_bump(_surf, _plane, seed);
+    static unsigned nd; if (nd++ < 6 || nd % 5000 == 0) nvlog("surface-out -> dirty, no copy (%ux%u surface %u seed %u, #%u)", _i.w, _i.h, (unsigned)IOSurfaceGetID(_surf), seed, nd);
+    return YES;
+}
 - (BOOL)nvmtlSurfaceOut {
     NVMTLTexture *r = _parent ? _parent : self;
     if (!r->_surf) return YES;
     if (![r nvmtlSurfaceCopyable]) return NO;
     // VRAM-only publication (no system-memory copy, no seed change) is enough for a CAMetalLayer drawable, because
-    // presentDrawable tells CoreAnimation about every frame, and for everything WindowServer draws itself. Other IOSurfaces
-    // reach WindowServer as CALayer contents (the Chromium/WebKit compositor and their WebGL buffers, video, Core Image)
-    // and showed up blank: they take the copy-out below, which also keeps the shared-VRAM tag in step.
-    // NVMTL_SURFACE_PAGEOFF_ALL=1 (environment or nvrm610.conf) restores VRAM-only publication for every surface.
-    static int vramOnlyAll = -1;
-    if (vramOnlyAll < 0) {
-        const char *me = getprogname(), *e = getenv("NVMTL_SURFACE_PAGEOFF_ALL");
-        vramOnlyAll = (me && !strcmp(me, "WindowServer")) || (e && e[0] == '1');
-        nvlog("surface-out: %s in %s", vramOnlyAll ? "every IOSurface may stay VRAM-only" :
-              "only presented drawables stay VRAM-only, other IOSurfaces are copied to system memory", me ? me : "?");
-    }
-    if (r->_vramOn && (vramOnlyAll || r->_drawable) &&
-        !nvmtl_vk_surface_dirty((uint32_t)IOSurfaceGetID(r->_surf), (uint32_t)r->_plane)) {
-        uint32_t seed = IOSurfaceGetSeed(r->_surf);
-        r->_surfSeed = seed; r->_surfSynced = YES;
-        r->_surfGen = nvmtl_vram_tag_bump(r->_surf, r->_plane, seed);
-        static unsigned nd; if (nd++ < 6 || nd % 5000 == 0) nvlog("surface-out -> dirty, no copy (%ux%u surface %u seed %u, #%u)", r->_i.w, r->_i.h, (unsigned)IOSurfaceGetID(r->_surf), seed, nd);
-        return YES;
-    }
+    // presentDrawable tells CoreAnimation about every frame, and for everything WindowServer draws itself. In a browser
+    // GPU process the other IOSurfaces reach WindowServer as CALayer contents (the Chromium compositor and its WebGL
+    // buffers) and showed up blank, so there they take the copy-out below, which also keeps the shared-VRAM tag in step.
+    // NVMTL_SURFACE_COPYOUT in nvrm610.conf (the environment only outside release builds) picks the processes: unset =
+    // names containing "Helper (GPU)" (Chromium and Electron GPU processes), 0 = none, all = every process, any other
+    // text = names containing it. WindowServer never copies.
+    static BOOL copyOut;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        const char *me = getprogname(), *e = getenv("NVMTL_SURFACE_COPYOUT");
+        if (!e || !*e) e = "Helper (GPU)";
+        copyOut = me && strcmp(me, "WindowServer") && strcmp(e, "0") && (!strcmp(e, "all") || strstr(me, e));
+        nvlog("surface-out: %s in %s", copyOut ? "IOSurfaces that are not presented drawables are copied to system memory" :
+              "IOSurfaces may stay VRAM-only", me ? me : "?");
+    });
+    const BOOL vramOnly = r->_vramOn && (!copyOut || r->_drawable);
+    if (vramOnly && [r nvmtlSurfacePublishVram]) return YES;
+    // a failed copy-out where VRAM-only publication was the old behaviour falls back to it rather than failing the command buffer
+    const BOOL fallback = r->_vramOn && !vramOnly;
     uint64_t t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
     uint32_t lockopt = nvmtl_noseed() ? kIOSurfaceLockReadOnly : 0;
-    if (IOSurfaceLock(r->_surf, lockopt, NULL) != kIOReturnSuccess) { nvlog("G13 surface-out: IOSurfaceLock FAILED"); return NO; }
+    if (IOSurfaceLock(r->_surf, lockopt, NULL) != kIOReturnSuccess) { nvlog("G13 surface-out: IOSurfaceLock FAILED"); return fallback && [r nvmtlSurfacePublishVram]; }
     void *base = IOSurfaceGetBaseAddressOfPlane(r->_surf, (uint32_t)r->_plane);
     size_t row = IOSurfaceGetBytesPerRowOfPlane(r->_surf, (uint32_t)r->_plane);
     int rc = (base && row) ? nvmtl_vk_image_read(r->_q, &r->_i, base, row) : -1;
     if (!rc && r->_i.bpp == 4) { char tag[24]; snprintf(tag, sizeof tag, "out%u-", (unsigned)IOSurfaceGetID(r->_surf)); nvmtl_frame_dump(tag, base, row, r->_i.w, r->_i.h); }
     uint32_t seed = 0; IOReturn unlocked = IOSurfaceUnlock(r->_surf, lockopt, &seed); if (lockopt) seed = IOSurfaceGetSeed(r->_surf);
-    if (rc || unlocked != kIOReturnSuccess) { nvlog("G13 surface-out: readback FAILED (%ux%u)", r->_i.w, r->_i.h); return NO; }
+    if (rc || unlocked != kIOReturnSuccess) { nvlog("G13 surface-out: readback FAILED (%ux%u)", r->_i.w, r->_i.h); return fallback && [r nvmtlSurfacePublishVram]; }
     r->_surfSeed = seed; r->_surfSynced = YES;
     r->_surfGen = r->_vramOn ? r->_surfGen : nvmtl_vram_gen(r->_surf, r->_plane);
     if (r->_vramOn && !lockopt) nvmtl_vram_tag_set(r->_surf, r->_plane, seed);
@@ -4553,8 +4562,10 @@ destinationBytesPerImage:(NSUInteger)img options:(MTLBlitOption)opt {
     }
     if ([drawable respondsToSelector:@selector(texture)]) {
         _present = (NVMTLTexture *)[(id<CAMetalDrawable>)drawable texture];
-        if (_present) (_present->_parent ? _present->_parent : _present)->_drawable = YES;
-        nvmtl_surf_dirty(self, _present);
+        if ([(id)_present isKindOfClass:[NVMTLTexture class]]) {
+            (_present->_parent ? _present->_parent : _present)->_drawable = YES;
+            nvmtl_surf_dirty(self, _present);
+        }
     }
     if (!_presentations) _presentations = [NSMutableArray new];
     [_presentations addObject:[action copy]];

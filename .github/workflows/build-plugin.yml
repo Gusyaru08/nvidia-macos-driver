@@ -1,11 +1,13 @@
 name: Build Metal plugin
 
 # Builds the Metal plugin (NVMTLDriver) the way build/build_plugin.sh does, in release mode, for macOS 15 x86_64.
-# Two binaries come out: this branch's plugin and an unmodified build of the base (main), so a self-built plugin
-# can be checked on its own before the change is tried.
+# Two binaries come out: this branch's plugin and an unmodified build of the 1.13.0 release it is based on, so a
+# self-built plugin can be checked on its own before the change is tried. The plugin calls into NVK internals, so the
+# branch must sit on top of that release.
 
 on:
   push:
+    branches: [main]
     paths:
       - 'plugin/**'
       - '.github/workflows/build-plugin.yml'
@@ -20,11 +22,18 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: build-plugin-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: macos-15
     env:
       VULKAN_HEADERS_TAG: v1.4.341
+      DRIVER_VERSION: 1.13.0
+      BASE_COMMIT: 0960b2ef5dbc4a573056d4c8e042a5bd2e15d651   # "Driver and Mac app 1.13.0"
+      SRC_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -35,16 +44,19 @@ jobs:
 
       - name: Toolchain
         run: |
+          # the plugin needs the macOS 15 SDK (MTLResidencySet, MTLLogState); README asks for Xcode 16
+          if [ -d /Applications/Xcode_16.4.app ]; then sudo xcode-select -s /Applications/Xcode_16.4.app; fi
           xcodebuild -version
           xcrun --show-sdk-version
           xcrun clang --version | head -1
+          xcodebuild -version | sed -n 1p | grep -q '^Xcode 16\.' || { echo "STOP: Xcode 16 is required"; exit 1; }
 
       - name: Base source (unmodified)
         run: |
-          base=$(git merge-base HEAD origin/main)
-          echo "base commit: $base"
+          git merge-base --is-ancestor "$BASE_COMMIT" HEAD || { echo "STOP: this branch is not based on $DRIVER_VERSION ($BASE_COMMIT)"; exit 1; }
+          echo "base commit: $BASE_COMMIT ($DRIVER_VERSION)"
           mkdir -p "$RUNNER_TEMP/base"
-          git archive "$base" plugin | tar -x -C "$RUNNER_TEMP/base"
+          git archive "$BASE_COMMIT" plugin | tar -x -C "$RUNNER_TEMP/base"
 
       - name: Build
         run: |
@@ -94,18 +106,25 @@ jobs:
           M
           done
           echo "== change marker"
-          strings -a out/NVMTLDriver | grep -c "NVMTL_SURFACE_PAGEOFF_ALL" || { echo "  patched build lacks the change"; miss=$((miss+1)); }
+          n=$(strings -a out/NVMTLDriver | grep -c "NVMTL_SURFACE_COPYOUT" || true)
+          echo "  patched: $n"; [ "$n" -ge 1 ] || { echo "  patched build lacks the change"; miss=$((miss+1)); }
+          n=$(strings -a out/NVMTLDriver-base | grep -c "NVMTL_SURFACE_COPYOUT" || true)
+          echo "  base: $n"; [ "$n" -eq 0 ] || { echo "  base build contains the change"; miss=$((miss+1)); }
           [ "$miss" = 0 ] || { echo "STOP: $miss problem(s)"; exit 1; }
 
       - name: Package
+        id: pkg
         run: |
           set -euo pipefail
           cp .github/plugin-artifact/INSTALL.txt out/INSTALL.txt
           ( cd out && shasum -a 256 NVMTLDriver NVMTLDriver-base > SHA256SUMS )
-          cat out/SHA256SUMS
+          { echo "driver $DRIVER_VERSION"; echo "source $SRC_COMMIT"; echo "base   $BASE_COMMIT"
+            xcodebuild -version | sed -n 1p; } > out/BUILD.txt
+          cat out/BUILD.txt out/SHA256SUMS
+          echo "name=NVMTLDriver-$DRIVER_VERSION-$(echo "$SRC_COMMIT" | cut -c1-7)-macos15-x86_64" >> "$GITHUB_OUTPUT"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: NVMTLDriver-macos15-x86_64
+          name: ${{ steps.pkg.outputs.name }}
           path: out/
           if-no-files-found: error

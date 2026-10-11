@@ -3,54 +3,104 @@ Plugin Metal de prueba (NVMTLDriver) - driver NullMoth 1.13.0, macOS 15, x86_64
 
 Archivos
 --------
-NVMTLDriver        el plugin CON el cambio: las IOSurface que no son drawables de CAMetalLayer
-                   (navegadores, video, Core Image) se copian a la memoria normal al terminar
-                   cada cuadro. WindowServer y las apps Metal normales siguen igual.
-NVMTLDriver-base   el mismo plugin SIN el cambio, compilado igual. Sirve para comprobar que
-                   un plugin compilado aqui funciona antes de probar el cambio.
+NVMTLDriver        el plugin CON el cambio. Solo cambia algo en los procesos GPU de Chromium y
+                   Electron (Brave, Chrome, Edge, Discord, VS Code...: los que se llaman
+                   "... Helper (GPU)"). Ahi, las IOSurface que no son drawables de CAMetalLayer se
+                   copian a la memoria normal al terminar cada cuadro. El escritorio y todas las
+                   demas apps siguen exactamente igual que con el plugin oficial.
+NVMTLDriver-base   el plugin 1.13.0 SIN el cambio, compilado aqui igual que el otro. Sirve para
+                   comprobar que un plugin compilado aqui funciona antes de probar el cambio.
 SHA256SUMS         sumas de verificacion.
+BUILD.txt          de que codigo sale cada archivo.
 
-Solo sirve con el driver 1.13.0 instalado (el plugin usa funciones internas de su NVK).
-Cuando la app de NullMoth actualice el driver, este archivo se reemplaza solo.
+Solo sirve con el driver 1.13.0 (el plugin usa funciones internas de su NVK). Compruebalo:
+     sudo cat /Library/NullMoth/driver-version
+Tiene que decir 1.13.0. Cuando la app 1401 actualice o reinstale el driver, este plugin se
+reemplaza solo por el oficial.
 
-Antes de empezar
+Si algo sale mal
 ----------------
-Ten a mano la forma de volver: tu config de OpenCore sin driver, o "NullMoth: Remove driver"
-en el menu de arranque.
+- Si el escritorio arranca: vuelve al plugin original (apartado "Volver al plugin original").
+- Si el escritorio no arranca: en el menu de OpenCore elige "1401: Remove NVIDIA driver". Quita el
+  driver entero y deja el Mac como antes de instalarlo (config de OpenCore incluida) y reinicia
+  solo. Despues reinstala el driver 1.13.0 con la app 1401: eso vuelve a poner el plugin oficial.
 
-1. Respaldo del plugin actual (una sola vez):
-     sudo ditto /Library/GPUBundles/NVMTLDriver.bundle ~/Desktop/NVMTLDriver.bundle.respaldo
+Preparar (una sola vez)
+-----------------------
+1. Respaldo del plugin oficial. Hazlo ANTES de instalar nada y no lo repitas despues (copiarias
+   el de prueba encima del respaldo):
+     sudo ditto /Library/GPUBundles/NVMTLDriver.bundle /Users/Shared/NVMTLDriver.bundle.respaldo
+     shasum -a 256 /Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/NVMTLDriver /Users/Shared/NVMTLDriver.bundle.respaldo/Contents/MacOS/NVMTLDriver
+   Las dos sumas tienen que ser iguales. Si no, no sigas.
 
-2. En la carpeta donde descomprimiste esto:
+2. En Terminal, entra en la carpeta donde descomprimiste esto (cd ...) y ejecuta:
      xattr -c NVMTLDriver NVMTLDriver-base
      shasum -a 256 -c SHA256SUMS
+   Los dos tienen que decir OK.
 
-Instalar uno de los dos (cambia NVMTLDriver por NVMTLDriver-base para el de comparacion)
-----------------------------------------------------------------------------------------
+Paso A: plugin base (sin el cambio)
+-----------------------------------
+     B=/Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS
+     sudo cp NVMTLDriver-base "$B/NVMTLDriver.new"
+     sudo chown root:wheel "$B/NVMTLDriver.new"
+     sudo chmod 755 "$B/NVMTLDriver.new"
+     sudo mv "$B/NVMTLDriver.new" "$B/NVMTLDriver"
+     shasum -a 256 "$B/NVMTLDriver"
+La suma tiene que ser la de NVMTLDriver-base en SHA256SUMS.
+
+Prueba Brave (abajo, "Probar Brave"). Con el base tiene que salir IGUAL que antes: ventana vacia.
+Eso es lo esperado. Luego reinicia y comprueba que el escritorio y tus apps van bien.
+Si algo va mal ya con el base, para aqui, vuelve al plugin original y avisa: el problema seria
+la compilacion, no el cambio.
+
+Paso B: plugin con el cambio
+----------------------------
      B=/Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS
      sudo cp NVMTLDriver "$B/NVMTLDriver.new"
      sudo chown root:wheel "$B/NVMTLDriver.new"
      sudo chmod 755 "$B/NVMTLDriver.new"
      sudo mv "$B/NVMTLDriver.new" "$B/NVMTLDriver"
+     shasum -a 256 "$B/NVMTLDriver"
+La suma tiene que ser la de NVMTLDriver en SHA256SUMS.
 
-El escritorio sigue usando el plugin anterior hasta que reinicies; las apps que abras desde
-ahora ya usan el nuevo. Asi puedes probar Brave sin reiniciar:
+Prueba Brave. Con el cambio deberia verse la ventana de Brave y el cubo de get.webgl.org.
 
-     pkill -x "Brave Browser"
+Probar Brave
+------------
+Las apps que abras despues de instalar ya usan el plugin nuevo. Las que ya estaban abiertas, el
+escritorio y algunos servicios del sistema siguen con el anterior hasta que reinicies o cierres
+sesion. Brave arranca su proceso GPU de cero, asi que basta con cerrarlo del todo:
+
+     pkill -x "Brave Browser"; while pgrep -x "Brave Browser" >/dev/null; do sleep 1; done
      open -a "Brave Browser" --args --disable-gpu-sandbox --disable-angle-features=disableMetalOnNvidia
 
-Abre get.webgl.org. Antes la ventana salia vacia; con el cambio deberia verse Brave y el cubo.
-(Sin sandbox es solo para probar.)
+Abre get.webgl.org. Sin sandbox es solo para probar.
 
-Si todo va bien, reinicia para que el escritorio tambien use el plugin nuevo.
+Si con el cambio funciona, prueba una vez mas CON el sandbox (lo normal), cerrando Brave igual:
+     open -a "Brave Browser" --args --disable-angle-features=disableMetalOnNvidia
+y apunta si se ve el cubo. Si no, el sandbox de Chromium sigue bloqueando el driver (es otro
+problema, ya reportado aparte).
 
 Volver al plugin original
 -------------------------
-     sudo ditto ~/Desktop/NVMTLDriver.bundle.respaldo /Library/GPUBundles/NVMTLDriver.bundle
-y reinicia. Si el escritorio no arranca: entra con la config sin driver (el plugin no se carga)
-y ejecuta ese mismo comando desde Terminal, o usa "NullMoth: Remove driver".
+     B=/Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS
+     sudo cp /Users/Shared/NVMTLDriver.bundle.respaldo/Contents/MacOS/NVMTLDriver "$B/NVMTLDriver.new"
+     sudo chown root:wheel "$B/NVMTLDriver.new"
+     sudo chmod 755 "$B/NVMTLDriver.new"
+     sudo mv "$B/NVMTLDriver.new" "$B/NVMTLDriver"
+y reinicia.
 
-Desactivar solo el cambio sin reinstalar
-----------------------------------------
-     echo "NVMTL_SURFACE_PAGEOFF_ALL=1" | sudo tee -a /Library/GPUBundles/nvmtl/nvrm610.conf
-(vuelve al comportamiento original en todos los procesos; borra esa linea para quitarlo).
+Elegir en que apps actua el cambio, sin reinstalar
+--------------------------------------------------
+Con la linea NVMTL_SURFACE_COPYOUT en /Library/GPUBundles/nvmtl/nvrm610.conf:
+     NVMTL_SURFACE_COPYOUT=0       en ninguna (igual que el plugin oficial)
+     NVMTL_SURFACE_COPYOUT=all     en todas las apps (mas lento; solo para probar)
+     NVMTL_SURFACE_COPYOUT=texto   en las apps cuyo proceso contiene ese texto,
+                                   p. ej. com.apple.WebKit.GPU para Safari
+Sin esa linea actua en los procesos "Helper (GPU)". El escritorio (WindowServer) nunca copia.
+
+Poner una (cambia 0 por lo que quieras):
+     printf '\nNVMTL_SURFACE_COPYOUT=0\n' | sudo tee -a /Library/GPUBundles/nvmtl/nvrm610.conf
+Quitarla:
+     sudo sed -i '' '/^NVMTL_SURFACE_COPYOUT=/d' /Library/GPUBundles/nvmtl/nvrm610.conf
+El archivo se lee al abrir cada app: cierra y vuelve a abrir las apps (o reinicia).
