@@ -1,0 +1,111 @@
+name: Build Metal plugin
+
+# Builds the Metal plugin (NVMTLDriver) the way build/build_plugin.sh does, in release mode, for macOS 15 x86_64.
+# Two binaries come out: this branch's plugin and an unmodified build of the base (main), so a self-built plugin
+# can be checked on its own before the change is tried.
+
+on:
+  push:
+    paths:
+      - 'plugin/**'
+      - '.github/workflows/build-plugin.yml'
+      - '.github/plugin-artifact/**'
+  pull_request:
+    paths:
+      - 'plugin/**'
+      - '.github/workflows/build-plugin.yml'
+      - '.github/plugin-artifact/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    env:
+      VULKAN_HEADERS_TAG: v1.4.341
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Vulkan headers
+        run: git clone --depth 1 --branch "$VULKAN_HEADERS_TAG" https://github.com/KhronosGroup/Vulkan-Headers "$RUNNER_TEMP/Vulkan-Headers"
+
+      - name: Toolchain
+        run: |
+          xcodebuild -version
+          xcrun --show-sdk-version
+          xcrun clang --version | head -1
+
+      - name: Base source (unmodified)
+        run: |
+          base=$(git merge-base HEAD origin/main)
+          echo "base commit: $base"
+          mkdir -p "$RUNNER_TEMP/base"
+          git archive "$base" plugin | tar -x -C "$RUNNER_TEMP/base"
+
+      - name: Build
+        run: |
+          set -euo pipefail
+          build() {   # $1 = plugin source dir, $2 = output file
+            ( cd "$1" && xcrun clang -arch x86_64 -mmacosx-version-min=15.0 -bundle -fobjc-arc -O1 -DNVMTL_RELEASE=1 \
+                -Wno-protocol -Wno-incomplete-implementation -I"$RUNNER_TEMP/Vulkan-Headers/include" \
+                -o "$2" NVMTLDevice.m -framework Foundation -framework Metal -framework IOSurface )
+            codesign -f -s - "$2"
+          }
+          mkdir -p out
+          build "$GITHUB_WORKSPACE/plugin" "$GITHUB_WORKSPACE/out/NVMTLDriver"
+          build "$RUNNER_TEMP/base/plugin" "$GITHUB_WORKSPACE/out/NVMTLDriver-base"
+
+      - name: Check
+        run: |
+          set -euo pipefail
+          miss=0
+          for b in out/NVMTLDriver out/NVMTLDriver-base; do
+            echo "== $b"
+            lipo -archs "$b"
+            [ "$(lipo -archs "$b")" = x86_64 ] || { echo "  not x86_64"; miss=$((miss+1)); }
+            minos=$(otool -l "$b" | awk '/LC_BUILD_VERSION/{f=1} f&&/minos/{print $2; exit}')
+            echo "  minos $minos"
+            [ "$minos" = 15.0 ] || { echo "  minimum macOS is not 15.0"; miss=$((miss+1)); }
+            codesign -dv "$b" 2>&1 | grep -E 'Signature|Identifier' || true
+            # markers build/build_plugin.sh checks: live features must be present, diagnostics absent in release
+            while IFS='|' read -r feat pat; do
+              [ -z "$feat" ] && continue
+              n=$(strings -a "$b" | grep -c -- "$pat" || true)
+              case "$feat" in
+                "fps file"|"passtime instrument") [ "$n" -eq 0 ] || { echo "  LEAKED diagnostic $feat"; miss=$((miss+1)); } ;;
+                *) [ "$n" -ge 1 ] || { echo "  MISSING $feat ($pat)"; miss=$((miss+1)); } ;;
+              esac
+            done <<'M'
+          vendor compiler lane (NVIDIAShared)|NVIDIAShared
+          SASS dispatch on NVK (sasspipe)|nvmtl_nvk_dispatch_sass_v1
+          vendor variant (Apple MTLCompiler handshake)|vendor variant
+          bindless-all heap slots|bindless-all - textures reach shaders
+          dirty-only bindings|NVMTL_NO_DIRTYONLY
+          fullclear (Apple whole-attachment clear)|begin_render: fullclear
+          per-stage binding mask (gfx-bmask)|gmask
+          fps file|nvmtl-fps-
+          passtime instrument|nvmtl-passtime-request
+          library key memo (xlate)|library key memo: hit
+          res2-evict (Apple order: newest wins the card)|on the allocating thread
+          M
+          done
+          echo "== change marker"
+          strings -a out/NVMTLDriver | grep -c "NVMTL_SURFACE_PAGEOFF_ALL" || { echo "  patched build lacks the change"; miss=$((miss+1)); }
+          [ "$miss" = 0 ] || { echo "STOP: $miss problem(s)"; exit 1; }
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          cp .github/plugin-artifact/INSTALL.txt out/INSTALL.txt
+          ( cd out && shasum -a 256 NVMTLDriver NVMTLDriver-base > SHA256SUMS )
+          cat out/SHA256SUMS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NVMTLDriver-macos15-x86_64
+          path: out/
+          if-no-files-found: error

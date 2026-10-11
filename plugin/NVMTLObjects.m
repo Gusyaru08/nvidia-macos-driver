@@ -1053,7 +1053,20 @@ extern int nvmtl_depthfmt_public(MTLPixelFormat, uint32_t *, uint32_t *);
     NVMTLTexture *r = _parent ? _parent : self;
     if (!r->_surf) return YES;
     if (![r nvmtlSurfaceCopyable]) return NO;
-    if (r->_vramOn && !nvmtl_vk_surface_dirty((uint32_t)IOSurfaceGetID(r->_surf), (uint32_t)r->_plane)) {
+    // VRAM-only publication (no system-memory copy, no seed change) is enough for a CAMetalLayer drawable, because
+    // presentDrawable tells CoreAnimation about every frame, and for everything WindowServer draws itself. Other IOSurfaces
+    // reach WindowServer as CALayer contents (the Chromium/WebKit compositor and their WebGL buffers, video, Core Image)
+    // and showed up blank: they take the copy-out below, which also keeps the shared-VRAM tag in step.
+    // NVMTL_SURFACE_PAGEOFF_ALL=1 (environment or nvrm610.conf) restores VRAM-only publication for every surface.
+    static int vramOnlyAll = -1;
+    if (vramOnlyAll < 0) {
+        const char *me = getprogname(), *e = getenv("NVMTL_SURFACE_PAGEOFF_ALL");
+        vramOnlyAll = (me && !strcmp(me, "WindowServer")) || (e && e[0] == '1');
+        nvlog("surface-out: %s in %s", vramOnlyAll ? "every IOSurface may stay VRAM-only" :
+              "only presented drawables stay VRAM-only, other IOSurfaces are copied to system memory", me ? me : "?");
+    }
+    if (r->_vramOn && (vramOnlyAll || r->_drawable) &&
+        !nvmtl_vk_surface_dirty((uint32_t)IOSurfaceGetID(r->_surf), (uint32_t)r->_plane)) {
         uint32_t seed = IOSurfaceGetSeed(r->_surf);
         r->_surfSeed = seed; r->_surfSynced = YES;
         r->_surfGen = nvmtl_vram_tag_bump(r->_surf, r->_plane, seed);
@@ -4540,6 +4553,7 @@ destinationBytesPerImage:(NSUInteger)img options:(MTLBlitOption)opt {
     }
     if ([drawable respondsToSelector:@selector(texture)]) {
         _present = (NVMTLTexture *)[(id<CAMetalDrawable>)drawable texture];
+        if (_present) (_present->_parent ? _present->_parent : _present)->_drawable = YES;
         nvmtl_surf_dirty(self, _present);
     }
     if (!_presentations) _presentations = [NSMutableArray new];

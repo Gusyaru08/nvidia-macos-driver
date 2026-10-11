@@ -1,0 +1,56 @@
+Plugin Metal de prueba (NVMTLDriver) - driver NullMoth 1.13.0, macOS 15, x86_64
+================================================================================
+
+Archivos
+--------
+NVMTLDriver        el plugin CON el cambio: las IOSurface que no son drawables de CAMetalLayer
+                   (navegadores, video, Core Image) se copian a la memoria normal al terminar
+                   cada cuadro. WindowServer y las apps Metal normales siguen igual.
+NVMTLDriver-base   el mismo plugin SIN el cambio, compilado igual. Sirve para comprobar que
+                   un plugin compilado aqui funciona antes de probar el cambio.
+SHA256SUMS         sumas de verificacion.
+
+Solo sirve con el driver 1.13.0 instalado (el plugin usa funciones internas de su NVK).
+Cuando la app de NullMoth actualice el driver, este archivo se reemplaza solo.
+
+Antes de empezar
+----------------
+Ten a mano la forma de volver: tu config de OpenCore sin driver, o "NullMoth: Remove driver"
+en el menu de arranque.
+
+1. Respaldo del plugin actual (una sola vez):
+     sudo ditto /Library/GPUBundles/NVMTLDriver.bundle ~/Desktop/NVMTLDriver.bundle.respaldo
+
+2. En la carpeta donde descomprimiste esto:
+     xattr -c NVMTLDriver NVMTLDriver-base
+     shasum -a 256 -c SHA256SUMS
+
+Instalar uno de los dos (cambia NVMTLDriver por NVMTLDriver-base para el de comparacion)
+----------------------------------------------------------------------------------------
+     B=/Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS
+     sudo cp NVMTLDriver "$B/NVMTLDriver.new"
+     sudo chown root:wheel "$B/NVMTLDriver.new"
+     sudo chmod 755 "$B/NVMTLDriver.new"
+     sudo mv "$B/NVMTLDriver.new" "$B/NVMTLDriver"
+
+El escritorio sigue usando el plugin anterior hasta que reinicies; las apps que abras desde
+ahora ya usan el nuevo. Asi puedes probar Brave sin reiniciar:
+
+     pkill -x "Brave Browser"
+     open -a "Brave Browser" --args --disable-gpu-sandbox --disable-angle-features=disableMetalOnNvidia
+
+Abre get.webgl.org. Antes la ventana salia vacia; con el cambio deberia verse Brave y el cubo.
+(Sin sandbox es solo para probar.)
+
+Si todo va bien, reinicia para que el escritorio tambien use el plugin nuevo.
+
+Volver al plugin original
+-------------------------
+     sudo ditto ~/Desktop/NVMTLDriver.bundle.respaldo /Library/GPUBundles/NVMTLDriver.bundle
+y reinicia. Si el escritorio no arranca: entra con la config sin driver (el plugin no se carga)
+y ejecuta ese mismo comando desde Terminal, o usa "NullMoth: Remove driver".
+
+Desactivar solo el cambio sin reinstalar
+----------------------------------------
+     echo "NVMTL_SURFACE_PAGEOFF_ALL=1" | sudo tee -a /Library/GPUBundles/nvmtl/nvrm610.conf
+(vuelve al comportamiento original en todos los procesos; borra esa linea para quitarlo).
