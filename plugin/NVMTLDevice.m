@@ -22,6 +22,7 @@
 #include "nvmtl_sample_positions.h"
 #include "nvmtl_log_failure.h"
 #include <sys/sysctl.h>
+#include <IOKit/IOKitLib.h>
 #ifndef NVMTL_RELEASE
 #define NVMTL_RELEASE 0
 #endif
@@ -361,6 +362,20 @@ static void nvmtl_install_hw_resource_pools(id dev)
     set(dev, NSSelectorFromString(@"setHwResourcePool:count:"), pools, 3);
     nvlog("  hw resource pools: installed 3 (slot 2 + count)");
 }
+// NVK reaches the GPU through NVAccel user clients of type 0x4E56xxxx; when it finds no device, open one here to show why.
+// kIOReturnNotPermitted (0xe00002e2) means a MAC policy such as a browser GPU sandbox refused the RM user client.
+static void nvmtl_rm_open_probe(void)
+{
+    io_service_t accel = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("NVAccel"));
+    if (!accel) { nvlog("  NVRM probe: no NVAccel service is visible here - the probe FAILED to find it"); return; }
+    io_connect_t c = 0;
+    kern_return_t kr = IOServiceOpen(accel, mach_task_self(), 0x4E560000u, &c);
+    IOObjectRelease(accel);
+    if (kr == KERN_SUCCESS) { IOServiceClose(c); nvlog("  NVRM probe: the RM user client opens here, so NVK FAILED for another reason"); return; }
+    nvlog("  NVRM probe: IOServiceOpen(NVAccel, 0x4E560000) FAILED 0x%08x%s in %s", kr,
+          kr == (kern_return_t)kIOReturnNotPermitted ? " (not permitted: this process's sandbox refused the RM user client)" : "",
+          getprogname());
+}
 - (instancetype)initWithAcceleratorPort:(mach_port_t)port {
     nvlog("-[NVMTLDevice initWithAcceleratorPort:%u] in %s", port, getprogname());
     self = [super initWithAcceleratorPort:port];
@@ -371,6 +386,7 @@ static void nvmtl_install_hw_resource_pools(id dev)
     nvmtl_install_hw_resource_pools(self);
     [self nvmtlProbeGPUPass];
     if (nvmtl_vk_init()) {
+        nvmtl_rm_open_probe();
         nvlog("  NVK did not come up in this process - refusing to be the Metal device for %s", getprogname());
         return nil;
     }

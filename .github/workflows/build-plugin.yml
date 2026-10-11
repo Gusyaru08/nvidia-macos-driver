@@ -64,7 +64,7 @@ jobs:
           build() {   # $1 = plugin source dir, $2 = output file
             ( cd "$1" && xcrun clang -arch x86_64 -mmacosx-version-min=15.0 -bundle -fobjc-arc -O1 -DNVMTL_RELEASE=1 \
                 -Wno-protocol -Wno-incomplete-implementation -I"$RUNNER_TEMP/Vulkan-Headers/include" \
-                -o "$2" NVMTLDevice.m -framework Foundation -framework Metal -framework IOSurface )
+                -o "$2" NVMTLDevice.m -framework Foundation -framework Metal -framework IOSurface -framework IOKit )
             codesign -f -s - "$2"
           }
           mkdir -p out

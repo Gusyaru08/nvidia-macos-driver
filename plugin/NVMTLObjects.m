@@ -76,6 +76,31 @@ static _Atomic uint64_t gRes2Tick;
 static void nvmtl_res2_note_use(NVMTLTexture *t);
 static uint64_t nvmtl_res2_evict(uint64_t want);
 extern uint64_t (*nvmtl_res2_evict_hook)(uint64_t want);
+// ANGLE (Chromium, Electron, CEF and WebKit) refuses its Metal back end on vendor 0x10de through the disableMetalOnNvidia
+// feature, which exists for Apple's old NVIDIA drivers. ANGLE reads ANGLE_FEATURE_OVERRIDES_DISABLED in
+// DisplayMtl::initializeFeatures(), after MTLCopyAllDevices has loaded this bundle, so adding the feature here lifts the
+// gate in the process that is about to use this device. NVMTL_ANGLE_ALLOW=0 in nvrm610.conf keeps ANGLE's refusal.
+static void nvmtl_angle_allow(void)
+{
+    const char *k = getenv("NVMTL_ANGLE_ALLOW");
+    if (k && k[0] == '0') return;
+    const char *me = getprogname();
+    if (me && !strcmp(me, "WindowServer")) return;
+    static const char feat[] = "disableMetalOnNvidia";
+    const size_t fl = sizeof feat - 1;
+    const char *cur = getenv("ANGLE_FEATURE_OVERRIDES_DISABLED");
+    if (cur && *cur) {
+        for (const char *p = cur; (p = strstr(p, feat)); p += fl)
+            if ((p == cur || p[-1] == ':') && (p[fl] == 0 || p[fl] == ':')) return;
+        char buf[1024];
+        int n = snprintf(buf, sizeof buf, "%s:%s", cur, feat);
+        if (n <= 0 || (size_t)n >= sizeof buf) return;
+        setenv("ANGLE_FEATURE_OVERRIDES_DISABLED", buf, 1);
+    } else {
+        setenv("ANGLE_FEATURE_OVERRIDES_DISABLED", feat, 1);
+    }
+    nvlog("angle: ANGLE_FEATURE_OVERRIDES_DISABLED lists %s in %s", feat, me ? me : "?");
+}
 __attribute__((constructor)) static void nvmtl_conf_knobs(void)
 {
 #if NVMTL_RELEASE
@@ -98,7 +123,7 @@ __attribute__((constructor)) static void nvmtl_conf_knobs(void)
       unsetenv("NVMTL_CONF_SET"); }
     char recbuf[2048]; size_t recn = 0; recbuf[0] = 0;
     FILE *f = fopen("/Library/GPUBundles/nvmtl/nvrm610.conf", "r");
-    if (!f) { if (forgot) nvlog("conf: forgot %u inherited knob(s); no conf file", forgot); return; }
+    if (!f) { if (forgot) nvlog("conf: forgot %u inherited knob(s); no conf file", forgot); nvmtl_angle_allow(); return; }
     char line[512];
     unsigned took = 0;
     while (fgets(line, sizeof line, f)) {
@@ -122,6 +147,7 @@ __attribute__((constructor)) static void nvmtl_conf_knobs(void)
     fclose(f);
     if (recn) setenv("NVMTL_CONF_SET", recbuf, 1);
     if (took || forgot) nvlog("conf: %u knob(s) read from /Library/GPUBundles/nvmtl/nvrm610.conf, %u inherited conf knob(s) forgotten first (the environment still wins)", took, forgot);
+    nvmtl_angle_allow();
 }
 static int nvmtl_dontcare_clears(void) {
     static int on = -1;
