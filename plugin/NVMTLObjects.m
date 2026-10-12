@@ -76,30 +76,59 @@ static _Atomic uint64_t gRes2Tick;
 static void nvmtl_res2_note_use(NVMTLTexture *t);
 static uint64_t nvmtl_res2_evict(uint64_t want);
 extern uint64_t (*nvmtl_res2_evict_hook)(uint64_t want);
+// One line that reaches the system log in release builds too, whose nvlog keeps failures only. What the plugin does in
+// a browser GPU process is otherwise missing from the logs a tester sends.
+static void nvmtl_note(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+static void nvmtl_note(const char *fmt, ...)
+{
+    char b[512]; va_list a; va_start(a, fmt); vsnprintf(b, sizeof b, fmt, a); va_end(a);
+#if NVMTL_RELEASE
+    syslog(LOG_NOTICE, "NullMoth: %s", b);
+#else
+    nvlog("note: %s", b);
+#endif
+}
+// The processes the browser GPU changes apply to (IOSurface copy-out and lifting ANGLE's NVIDIA gate), chosen by
+// NVMTL_SURFACE_COPYOUT in nvrm610.conf (the environment only outside release builds): unset = names containing
+// "Helper (GPU)" (Chromium and Electron GPU processes), 0 = none, all = every process, any other text = names
+// containing it. WindowServer is never one of them; it still copies out exactly where 1.13.0 did.
+static BOOL nvmtl_browser_gpu_process(void)
+{
+    const char *me = getprogname(), *e = getenv("NVMTL_SURFACE_COPYOUT");
+    if (!e || !*e) e = "Helper (GPU)";
+    return me && strcmp(me, "WindowServer") && strcmp(e, "0") && (!strcmp(e, "all") || strstr(me, e));
+}
 // ANGLE (Chromium, Electron, CEF and WebKit) refuses its Metal back end on vendor 0x10de through the disableMetalOnNvidia
-// feature, which exists for Apple's old NVIDIA drivers. ANGLE reads ANGLE_FEATURE_OVERRIDES_DISABLED in
-// DisplayMtl::initializeFeatures(), after MTLCopyAllDevices has loaded this bundle, so adding the feature here lifts the
-// gate in the process that is about to use this device. NVMTL_ANGLE_ALLOW=0 in nvrm610.conf keeps ANGLE's refusal.
+// feature, which exists for Apple's old NVIDIA drivers. ANGLE reads ANGLE_FEATURE_OVERRIDES_DISABLED with getenv in
+// DisplayMtl::initializeFeatures(), after creating its MTLDevice has loaded this bundle, and checks the gate after
+// that, so adding the feature here lifts the gate in the process that is about to use this device. Only the processes
+// that also copy IOSurfaces out get it: ANGLE on this device with VRAM-only publication left browser windows blank,
+// and with NVMTL_SURFACE_COPYOUT=0 the plugin then behaves like the official one again. NVMTL_ANGLE_ALLOW=0 in
+// nvrm610.conf keeps ANGLE's refusal. Child processes inherit the variable; a browser GPU process starts none.
 static void nvmtl_angle_allow(void)
 {
-    const char *k = getenv("NVMTL_ANGLE_ALLOW");
-    if (k && k[0] == '0') return;
+    if (!nvmtl_browser_gpu_process()) return;
     const char *me = getprogname();
-    if (me && !strcmp(me, "WindowServer")) return;
+    const char *k = getenv("NVMTL_ANGLE_ALLOW");
+    if (k && k[0] == '0') { nvmtl_note("browser GPU process %s: ANGLE keeps refusing Metal on NVIDIA (NVMTL_ANGLE_ALLOW=0)", me); return; }
     static const char feat[] = "disableMetalOnNvidia";
     const size_t fl = sizeof feat - 1;
     const char *cur = getenv("ANGLE_FEATURE_OVERRIDES_DISABLED");
+    BOOL listed = NO;
     if (cur && *cur) {
-        for (const char *p = cur; (p = strstr(p, feat)); p += fl)
-            if ((p == cur || p[-1] == ':') && (p[fl] == 0 || p[fl] == ':')) return;
-        char buf[1024];
-        int n = snprintf(buf, sizeof buf, "%s:%s", cur, feat);
-        if (n <= 0 || (size_t)n >= sizeof buf) return;
-        setenv("ANGLE_FEATURE_OVERRIDES_DISABLED", buf, 1);
+        for (const char *p = cur; !listed && (p = strstr(p, feat)); p += fl)
+            listed = (p == cur || p[-1] == ':') && (p[fl] == 0 || p[fl] == ':');
+        if (!listed) {
+            char buf[1024];
+            int n = snprintf(buf, sizeof buf, "%s:%s", cur, feat);
+            if (n <= 0 || (size_t)n >= sizeof buf) { nvmtl_note("browser GPU process %s: ANGLE_FEATURE_OVERRIDES_DISABLED is too long - ANGLE's NVIDIA gate NOT lifted", me); return; }
+            setenv("ANGLE_FEATURE_OVERRIDES_DISABLED", buf, 1);
+        }
     } else {
         setenv("ANGLE_FEATURE_OVERRIDES_DISABLED", feat, 1);
     }
-    nvlog("angle: ANGLE_FEATURE_OVERRIDES_DISABLED lists %s in %s", feat, me ? me : "?");
+    nvmtl_note("browser GPU process %s: ANGLE may use Metal on NVIDIA (%s in ANGLE_FEATURE_OVERRIDES_DISABLED%s)", me, feat,
+               listed ? ", already there" : "");
 }
 __attribute__((constructor)) static void nvmtl_conf_knobs(void)
 {
@@ -1091,18 +1120,18 @@ extern int nvmtl_depthfmt_public(MTLPixelFormat, uint32_t *, uint32_t *);
     // VRAM-only publication (no system-memory copy, no seed change) is enough for a CAMetalLayer drawable, because
     // presentDrawable tells CoreAnimation about every frame, and for everything WindowServer draws itself. In a browser
     // GPU process the other IOSurfaces reach WindowServer as CALayer contents (the Chromium compositor and its WebGL
-    // buffers) and showed up blank, so there they take the copy-out below, which also keeps the shared-VRAM tag in step.
-    // NVMTL_SURFACE_COPYOUT in nvrm610.conf (the environment only outside release builds) picks the processes: unset =
-    // names containing "Helper (GPU)" (Chromium and Electron GPU processes), 0 = none, all = every process, any other
-    // text = names containing it. WindowServer never copies.
+    // buffers) and showed up blank, so in the processes nvmtl_browser_gpu_process() picks they take the copy-out below,
+    // which also keeps the shared-VRAM tag in step.
     static BOOL copyOut;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        const char *me = getprogname(), *e = getenv("NVMTL_SURFACE_COPYOUT");
-        if (!e || !*e) e = "Helper (GPU)";
-        copyOut = me && strcmp(me, "WindowServer") && strcmp(e, "0") && (!strcmp(e, "all") || strstr(me, e));
-        nvlog("surface-out: %s in %s", copyOut ? "IOSurfaces that are not presented drawables are copied to system memory" :
-              "IOSurfaces may stay VRAM-only", me ? me : "?");
+        const char *me = getprogname();
+        copyOut = nvmtl_browser_gpu_process();
+        if (copyOut)
+            nvmtl_note("browser GPU process %s: IOSurfaces that are not presented drawables are copied to system memory after each GPU write (%s)",
+                       me ? me : "?", nvmtl_vk_surface_share_on() ? "IOSurface textures share the surface's VRAM across processes"
+                       : "IOSurface textures are private per process, e.g. on a headless GPU, and 1.13.0 already copied them all out");
+        else nvlog("surface-out: IOSurfaces may stay VRAM-only in %s", me ? me : "?");
     });
     const BOOL vramOnly = r->_vramOn && (!copyOut || r->_drawable);
     if (vramOnly && [r nvmtlSurfacePublishVram]) return YES;
@@ -1110,6 +1139,10 @@ extern int nvmtl_depthfmt_public(MTLPixelFormat, uint32_t *, uint32_t *);
     const BOOL fallback = r->_vramOn && !vramOnly;
     uint64_t t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
     uint32_t lockopt = nvmtl_noseed() ? kIOSurfaceLockReadOnly : 0;
+    // The GPU write has finished, so the family VRAM holds this frame and system memory does not yet. Say so before the
+    // readback: otherwise a process that samples the surface meanwhile finds no current tag and uploads the stale system
+    // memory over the frame in VRAM (VRAM-only publication tagged it at once; the readback takes milliseconds).
+    if (copyOut && r->_vramOn && !lockopt) nvmtl_vram_tag_set(r->_surf, r->_plane, IOSurfaceGetSeed(r->_surf));
     if (IOSurfaceLock(r->_surf, lockopt, NULL) != kIOReturnSuccess) { nvlog("G13 surface-out: IOSurfaceLock FAILED"); return fallback && [r nvmtlSurfacePublishVram]; }
     void *base = IOSurfaceGetBaseAddressOfPlane(r->_surf, (uint32_t)r->_plane);
     size_t row = IOSurfaceGetBytesPerRowOfPlane(r->_surf, (uint32_t)r->_plane);

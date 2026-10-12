@@ -37,6 +37,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          # the commit the artifact is named after, not GitHub's merge of the PR into main
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
 
       - name: Vulkan headers
@@ -53,6 +55,7 @@ jobs:
 
       - name: Base source (unmodified)
         run: |
+          [ "$(git rev-parse HEAD)" = "$SRC_COMMIT" ] || { echo "STOP: checked out $(git rev-parse HEAD), expected $SRC_COMMIT"; exit 1; }
           git merge-base --is-ancestor "$BASE_COMMIT" HEAD || { echo "STOP: this branch is not based on $DRIVER_VERSION ($BASE_COMMIT)"; exit 1; }
           echo "base commit: $BASE_COMMIT ($DRIVER_VERSION)"
           mkdir -p "$RUNNER_TEMP/base"
@@ -105,11 +108,14 @@ jobs:
           res2-evict (Apple order: newest wins the card)|on the allocating thread
           M
           done
-          echo "== change marker"
-          n=$(strings -a out/NVMTLDriver | grep -c "NVMTL_SURFACE_COPYOUT" || true)
-          echo "  patched: $n"; [ "$n" -ge 1 ] || { echo "  patched build lacks the change"; miss=$((miss+1)); }
-          n=$(strings -a out/NVMTLDriver-base | grep -c "NVMTL_SURFACE_COPYOUT" || true)
-          echo "  base: $n"; [ "$n" -eq 0 ] || { echo "  base build contains the change"; miss=$((miss+1)); }
+          echo "== change markers (in the patched build, not in the base)"
+          for pat in "NVMTL_SURFACE_COPYOUT" "NVMTL_ANGLE_ALLOW" "NVRM probe" "browser GPU process %s"; do
+            n=$(strings -a out/NVMTLDriver | grep -c -- "$pat" || true)
+            b=$(strings -a out/NVMTLDriver-base | grep -c -- "$pat" || true)
+            echo "  $pat: patched $n, base $b"
+            [ "$n" -ge 1 ] || { echo "  patched build lacks $pat"; miss=$((miss+1)); }
+            [ "$b" -eq 0 ] || { echo "  base build contains $pat"; miss=$((miss+1)); }
+          done
           [ "$miss" = 0 ] || { echo "STOP: $miss problem(s)"; exit 1; }
 
       - name: Package

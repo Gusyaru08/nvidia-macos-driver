@@ -3,11 +3,15 @@ Plugin Metal de prueba (NVMTLDriver) - driver NullMoth 1.13.0, macOS 15, x86_64
 
 Archivos
 --------
-NVMTLDriver        el plugin CON el cambio. Solo cambia algo en los procesos GPU de Chromium y
-                   Electron (Brave, Chrome, Edge, Discord, VS Code...: los que se llaman
-                   "... Helper (GPU)"). Ahi, las IOSurface que no son drawables de CAMetalLayer se
-                   copian a la memoria normal al terminar cada cuadro. El escritorio y todas las
-                   demas apps siguen exactamente igual que con el plugin oficial.
+NVMTLDriver        el plugin CON el cambio. Solo actua en los procesos GPU de Chromium y Electron
+                   (Brave, Chrome, Edge, Discord, VS Code...: los que se llaman "... Helper (GPU)").
+                   Ahi hace dos cosas:
+                   - quita el bloqueo de ANGLE a Metal en las NVIDIA (disableMetalOnNvidia), asi que
+                     ya no hace falta --disable-angle-features;
+                   - al terminar cada cuadro, copia a la memoria normal las IOSurface que no son
+                     drawables de CAMetalLayer.
+                   El escritorio (WindowServer) y todas las demas apps siguen igual que con el
+                   plugin oficial.
 NVMTLDriver-base   el plugin 1.13.0 SIN el cambio, compilado aqui igual que el otro. Sirve para
                    comprobar que un plugin compilado aqui funciona antes de probar el cambio.
 SHA256SUMS         sumas de verificacion.
@@ -21,9 +25,11 @@ reemplaza solo por el oficial.
 Si algo sale mal
 ----------------
 - Si el escritorio arranca: vuelve al plugin original (apartado "Volver al plugin original").
-- Si el escritorio no arranca: en el menu de OpenCore elige "1401: Remove NVIDIA driver". Quita el
-  driver entero y deja el Mac como antes de instalarlo (config de OpenCore incluida) y reinicia
-  solo. Despues reinstala el driver 1.13.0 con la app 1401: eso vuelve a poner el plugin oficial.
+- Si el escritorio no arranca: en el menu de OpenCore elige "1401: Remove NVIDIA driver". Cuando
+  pregunte (en ingles, "Press Y to remove it..."), pulsa Y: cualquier otra tecla, Enter incluido,
+  o esperar 60 s no cambia nada. Luego elige tu disco de macOS: arranca sin el driver, lo quita
+  entero, deja el Mac como antes de instalarlo (config de OpenCore incluida) y reinicia solo.
+  Despues reinstala el driver 1.13.0 con la app 1401: eso vuelve a poner el plugin oficial.
 
 Preparar (una sola vez)
 -----------------------
@@ -48,7 +54,7 @@ Paso A: plugin base (sin el cambio)
      shasum -a 256 "$B/NVMTLDriver"
 La suma tiene que ser la de NVMTLDriver-base en SHA256SUMS.
 
-Prueba Brave (abajo, "Probar Brave"). Con el base tiene que salir IGUAL que antes: ventana vacia.
+Haz la prueba A1 de "Probar Brave". Con el base tiene que salir IGUAL que antes: ventana vacia.
 Eso es lo esperado. Luego reinicia y comprueba que el escritorio y tus apps van bien.
 Si algo va mal ya con el base, para aqui, vuelve al plugin original y avisa: el problema seria
 la compilacion, no el cambio.
@@ -63,23 +69,44 @@ Paso B: plugin con el cambio
      shasum -a 256 "$B/NVMTLDriver"
 La suma tiene que ser la de NVMTLDriver en SHA256SUMS.
 
-Prueba Brave. Con el cambio deberia verse la ventana de Brave y el cubo de get.webgl.org.
+Haz las pruebas B1 y B2 de "Probar Brave" (y B3 si hace falta). En B1 deberia verse la ventana de
+Brave y el cubo de get.webgl.org, sin --disable-angle-features. En B2 apunta si se ven: el sandbox
+de Chromium puede seguir impidiendo que Brave use la NVIDIA, y entonces el registro dice por que.
 
 Probar Brave
 ------------
 Las apps que abras despues de instalar ya usan el plugin nuevo. Las que ya estaban abiertas, el
 escritorio y algunos servicios del sistema siguen con el anterior hasta que reinicies o cierres
-sesion. Brave arranca su proceso GPU de cero, asi que basta con cerrarlo del todo:
-
+sesion. Brave arranca su proceso GPU de cero, asi que basta con cerrarlo del todo antes de cada
+prueba:
      pkill -x "Brave Browser"; while pgrep -x "Brave Browser" >/dev/null; do sleep 1; done
+
+A1 (Paso A), sin sandbox y con la opcion de ANGLE (el base no quita el bloqueo por si solo):
      open -a "Brave Browser" --args --disable-gpu-sandbox --disable-angle-features=disableMetalOnNvidia
+B1 (Paso B), sin sandbox y SIN la opcion de ANGLE (eso lo hace ahora el plugin):
+     open -a "Brave Browser" --args --disable-gpu-sandbox
+B2 (Paso B), normal, con el sandbox, como al abrirlo desde el Dock:
+     open -a "Brave Browser"
+B3 (Paso B), solo si B1 sale en blanco o sin WebGL: repite B1 con la opcion de ANGLE:
+     open -a "Brave Browser" --args --disable-gpu-sandbox --disable-angle-features=disableMetalOnNvidia
+   Si asi se ve, el fallo esta en como el plugin quita el bloqueo de ANGLE. Si sigue en blanco,
+   esta en la copia de las IOSurface.
+Sin sandbox es solo para probar.
 
-Abre get.webgl.org. Sin sandbox es solo para probar.
+En cada prueba apunta:
+- si se ve la ventana de Brave;
+- en brave://gpu: "Display type" (deberia decir ANGLE_METAL) y "GL_RENDERER" (deberia nombrar
+  ANGLE Metal Renderer y la RTX 3050);
+- si get.webgl.org muestra el cubo.
 
-Si con el cambio funciona, prueba una vez mas CON el sandbox (lo normal), cerrando Brave igual:
-     open -a "Brave Browser" --args --disable-angle-features=disableMetalOnNvidia
-y apunta si se ve el cubo. Si no, el sandbox de Chromium sigue bloqueando el driver (es otro
-problema, ya reportado aparte).
+Y al terminar cada prueba, antes de empezar la siguiente, guarda el registro del driver (cambia A1
+por la prueba que sea; recoge los ultimos 15 minutos):
+     sudo log show --last 15m --style compact --predicate 'eventMessage CONTAINS "NullMoth"' > ~/Desktop/nullmoth-A1.txt
+Manda esos archivos tal cual. Con el plugin del Paso B, cada proceso GPU de Brave escribe ahi
+lineas "browser GPU process ..." que dicen si quito el bloqueo de ANGLE, si copia las IOSurface y
+si la VRAM de las IOSurface se comparte entre procesos. Si el proceso no consigue la NVIDIA (lo
+normal en B2 hasta ahora), salen lineas con "FAILED", "REFUSING" o "no device" que dicen por que;
+por ejemplo "NVRM probe: ... not permitted" si el sandbox de Chromium lo bloquea.
 
 Volver al plugin original
 -------------------------
@@ -95,12 +122,19 @@ Elegir en que apps actua el cambio, sin reinstalar
 Con la linea NVMTL_SURFACE_COPYOUT en /Library/GPUBundles/nvmtl/nvrm610.conf:
      NVMTL_SURFACE_COPYOUT=0       en ninguna (igual que el plugin oficial)
      NVMTL_SURFACE_COPYOUT=all     en todas las apps (mas lento; solo para probar)
-     NVMTL_SURFACE_COPYOUT=texto   en las apps cuyo proceso contiene ese texto,
-                                   p. ej. com.apple.WebKit.GPU para Safari
-Sin esa linea actua en los procesos "Helper (GPU)". El escritorio (WindowServer) nunca copia.
+     NVMTL_SURFACE_COPYOUT=texto   en las apps cuyo proceso contiene ese texto
+Sin esa linea actua en los procesos "Helper (GPU)". En el escritorio (WindowServer) no actua
+nunca. Donde actua hace las dos cosas: quita el bloqueo de ANGLE y copia las IOSurface.
 
-Poner una (cambia 0 por lo que quieras):
-     printf '\nNVMTL_SURFACE_COPYOUT=0\n' | sudo tee -a /Library/GPUBundles/nvmtl/nvrm610.conf
-Quitarla:
+Con NVMTL_ANGLE_ALLOW=0 en el mismo archivo, sigue copiando pero ANGLE vuelve a negarse a usar
+Metal en la NVIDIA, como con el plugin oficial.
+
+Poner o cambiar un valor. Solo vale la primera linea de cada nombre, asi que primero se borra la
+que hubiera (cambia el 0 por lo que quieras):
      sudo sed -i '' '/^NVMTL_SURFACE_COPYOUT=/d' /Library/GPUBundles/nvmtl/nvrm610.conf
+     printf '\nNVMTL_SURFACE_COPYOUT=0\n' | sudo tee -a /Library/GPUBundles/nvmtl/nvrm610.conf
+Lo mismo con NVMTL_ANGLE_ALLOW:
+     sudo sed -i '' '/^NVMTL_ANGLE_ALLOW=/d' /Library/GPUBundles/nvmtl/nvrm610.conf
+     printf '\nNVMTL_ANGLE_ALLOW=0\n' | sudo tee -a /Library/GPUBundles/nvmtl/nvrm610.conf
+Quitar un valor: solo la linea "sudo sed" de ese nombre.
 El archivo se lee al abrir cada app: cierra y vuelve a abrir las apps (o reinicia).

@@ -22,6 +22,7 @@
 #include "nvmtl_sample_positions.h"
 #include "nvmtl_log_failure.h"
 #include <sys/sysctl.h>
+#include <errno.h>
 #include <IOKit/IOKitLib.h>
 #ifndef NVMTL_RELEASE
 #define NVMTL_RELEASE 0
@@ -167,11 +168,13 @@ static nvk_queue *nvmtl_device_queue(void) {
     if (!made) { if (nvmtl_vk_queue_create(&q)) { nvlog("device queue FAILED"); return NULL; } made = 1; }
     return &q;
 }
-static bool nvmtl_accel_armed(void)
+// 0 = armed, else why not: -1 = debug.nvaccelfb reads 0, or the errno of a read that failed (a browser GPU sandbox
+// allows only listed sysctl names, so there the read itself can be refused)
+static int nvmtl_accel_unarmed(void)
 {
     int v = 0; size_t n = sizeof v;
-    if (sysctlbyname("debug.nvaccelfb", &v, &n, NULL, 0) != 0) return false;
-    return v != 0;
+    if (sysctlbyname("debug.nvaccelfb", &v, &n, NULL, 0) != 0) return errno ? errno : EPERM;
+    return v != 0 ? 0 : -1;
 }
 #include <dlfcn.h>
 #include <libgen.h>
@@ -316,8 +319,13 @@ static bool nvmtl_process_is_allowed(void)
         bool armedOnly = false;
         if (*p == '!') { armedOnly = true; p++; while (*p == ' ' || *p == '\t') p++; }
         if (strcmp(p, "*") && strcmp(p, me)) continue;
-        if (armedOnly && !nvmtl_accel_armed()) {
+        int unarmed = armedOnly ? nvmtl_accel_unarmed() : 0;
+        if (unarmed < 0) {
             nvlog("  '%s' is armed-only and debug.nvaccelfb reads 0 -- no device (arm it with sysctl -w debug.nvaccelfb=1)", me);
+            break;
+        }
+        if (unarmed > 0) {
+            nvlog("  '%s' is armed-only and reading debug.nvaccelfb FAILED (errno %d: %s) -- no device", me, unarmed, strerror(unarmed));
             break;
         }
         ok = true; break;
@@ -387,7 +395,7 @@ static void nvmtl_rm_open_probe(void)
     [self nvmtlProbeGPUPass];
     if (nvmtl_vk_init()) {
         nvmtl_rm_open_probe();
-        nvlog("  NVK did not come up in this process - refusing to be the Metal device for %s", getprogname());
+        nvlog("  NVK did not come up in this process - REFUSING to be the Metal device for %s", getprogname());
         return nil;
     }
     nvmtl_nvdec_register();

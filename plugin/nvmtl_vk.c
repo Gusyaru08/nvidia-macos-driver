@@ -48,6 +48,7 @@ static VkImageAspectFlags nvmtl_barrier_aspect(const nvk_image *img)
 #include <limits.h>
 #include <sys/stat.h>
 #include <pthread.h>
+#include <syslog.h>
 static pthread_mutex_t g_gpu_clock_lock = PTHREAD_MUTEX_INITIALIZER;
 static inline const char *nvmtl_pick_vk(const char *staged, const char *dev) {
     return access(staged, R_OK) == 0 ? staged : dev;
@@ -426,6 +427,31 @@ static int nvmtl_vkmsg_budget(uint64_t key, uint64_t *rep, int *full)
     if (n % NVMTL_VKMSG_EVERY == 0) { *rep = n; return 1; }
     return 0;
 }
+#if defined(NVMTL_RELEASE) && NVMTL_RELEASE
+// Release builds keep no log file (their fopen refuses nvmtl_log_path()), so NVK's own errors while it is not up (the
+// RM call that failed and where) go to the system log. During bring-up they are held and written only if bring-up fails; after a lost device they are
+// written as they come (rate-limited by nvmtl_vkmsg_budget). A process whose NVK stays up logs none.
+static pthread_mutex_t g_vk_held_lock = PTHREAD_MUTEX_INITIALIZER;
+static char g_vk_held[4][600];
+static unsigned g_vk_heldn;
+static _Atomic int g_vk_bringup;
+static void nvmtl_vk_release_error(const char *t)
+{
+    if (!atomic_load(&g_vk_bringup)) { syslog(LOG_ERR, "NullMoth: %s", t); return; }
+    pthread_mutex_lock(&g_vk_held_lock);
+    if (g_vk_heldn < 4) snprintf(g_vk_held[g_vk_heldn], sizeof g_vk_held[0], "%s", t);
+    g_vk_heldn++;
+    pthread_mutex_unlock(&g_vk_held_lock);
+}
+static void nvmtl_vk_release_errors_flush(void)
+{
+    pthread_mutex_lock(&g_vk_held_lock);
+    for (unsigned i = 0; i < g_vk_heldn && i < 4; i++) syslog(LOG_ERR, "NullMoth: %s", g_vk_held[i]);
+    if (g_vk_heldn > 4) syslog(LOG_ERR, "NullMoth: nvk-reason: %u more NVK error(s) during the FAILED bring-up", g_vk_heldn - 4);
+    g_vk_heldn = 0;
+    pthread_mutex_unlock(&g_vk_held_lock);
+}
+#endif
 static VkBool32 VKAPI_PTR nvmtl_vkmsg_cb(VkDebugUtilsMessageSeverityFlagBitsEXT sev, VkDebugUtilsMessageTypeFlagsEXT type,
                                          const VkDebugUtilsMessengerCallbackDataEXT *d, void *user)
 {
@@ -436,6 +462,9 @@ static VkBool32 VKAPI_PTR nvmtl_vkmsg_cb(VkDebugUtilsMessageSeverityFlagBitsEXT 
     const char *b = strrchr(id, '/'); b = b ? b + 1 : id;
     char t[600]; snprintf(t, sizeof t, "nvk-reason: %s %s: %s", (sev & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) ? "E" : "W", b, m);
     for (char *c = t; *c; c++) if ((unsigned char)*c < 0x20) *c = ' ';
+#if defined(NVMTL_RELEASE) && NVMTL_RELEASE
+    if ((sev & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) && atomic_load(&g_state) != 1) nvmtl_vk_release_error(t);
+#endif
     extern const char *nvmtl_log_path(void);
     FILE *f = fopen(nvmtl_log_path(), "a");
     if (f) {
@@ -570,6 +599,7 @@ static int nvmtl_vk_initialize(void)
             }
         }
     }
+    char direct_why[300] = "not tried";
     g_lib = dlopen(NVMTL_ICD_LIB, RTLD_NOW | RTLD_LOCAL);
     if (g_lib) {
         pvkGetInstanceProcAddr = (PFN_vkGetInstanceProcAddr)dlsym(g_lib, "vkGetInstanceProcAddr");
@@ -584,20 +614,21 @@ static int nvmtl_vk_initialize(void)
             pnvk_sample_depth_image = (VkResult (*)(VkDevice, VkImage, uint32_t *))dlsym(g_lib, "nvmtl_nvk_sample_depth_image_v1");
             pnvk_sparse = (int (*)(void))dlsym(g_lib, "nvmtl_nvk_sparse_bind_v1");
         }
-        else { nvlog("vk: %s has no vkGetInstanceProcAddr", NVMTL_ICD_LIB); dlclose(g_lib); g_lib = NULL; }
+        else { snprintf(direct_why, sizeof direct_why, "it has no vkGetInstanceProcAddr"); nvlog("vk: %s has no vkGetInstanceProcAddr", NVMTL_ICD_LIB); dlclose(g_lib); g_lib = NULL; }
     } else {
-        nvlog("vk: dlopen(%s): %s", NVMTL_ICD_LIB, dlerror());
+        const char *de = dlerror(); snprintf(direct_why, sizeof direct_why, "%s", de ? de : "?");
+        nvlog("vk: dlopen(%s): %s", NVMTL_ICD_LIB, direct_why);
     }
     if (!pvkGetInstanceProcAddr) {
         if (!getenv("VK_ICD_FILENAMES")) setenv("VK_ICD_FILENAMES", NVMTL_ICD, 1);
         g_lib = dlopen(NVMTL_LOADER, RTLD_NOW | RTLD_LOCAL);
-        if (!g_lib) { nvlog("vk: dlopen(%s): %s", NVMTL_LOADER, dlerror()); return -1; }
+        if (!g_lib) { nvlog("vk: dlopen(%s) FAILED: %s (direct open of %s: %s)", NVMTL_LOADER, dlerror(), NVMTL_ICD_LIB, direct_why); return -1; }
         pvkGetInstanceProcAddr = (PFN_vkGetInstanceProcAddr)dlsym(g_lib, "vkGetInstanceProcAddr");
-        if (!pvkGetInstanceProcAddr) { nvlog("vk: no vkGetInstanceProcAddr"); return -1; }
+        if (!pvkGetInstanceProcAddr) { nvlog("vk: no vkGetInstanceProcAddr in the loader - NVK FAILED"); return -1; }
         nvlog("vk: fell back to the loader at %s", NVMTL_LOADER);
     }
     pvkCreateInstance = (PFN_vkCreateInstance)pvkGetInstanceProcAddr(NULL, "vkCreateInstance");
-    if (!pvkCreateInstance) { nvlog("vk: no vkCreateInstance"); return -1; }
+    if (!pvkCreateInstance) { nvlog("vk: no vkCreateInstance - NVK FAILED"); return -1; }
 
     VkApplicationInfo ai = { VK_STRUCTURE_TYPE_APPLICATION_INFO, NULL, "NVMTLDriver", 1, "NVMTL", 1, VK_API_VERSION_1_3 };
     VkInstanceCreateInfo ici = { VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, NULL, 0, &ai, 0, NULL, 0, NULL };
@@ -609,7 +640,7 @@ static int nvmtl_vk_initialize(void)
     if (er != VK_SUCCESS || !n) {
         nvlog("vk: zero physical devices through this ICD — vkEnumeratePhysicalDevices -> VkResult %d, count %u, in %s (uid %u euid %u): %s",
               (int)er, n, getprogname(), (unsigned)getuid(), (unsigned)geteuid(),
-              er != VK_SUCCESS ? "the ENUMERATION failed, so NVK could not reach the device (not an absent GPU)"
+              er != VK_SUCCESS ? "the ENUMERATION FAILED, so NVK could not reach the device (not an absent GPU)"
                                : "the enumeration SUCCEEDED and found no device through this ICD");
         return -1; }
     nvlog("vk: pdev %u physical device(s) through this ICD (VkResult %d)", n, (int)er);
@@ -629,7 +660,7 @@ static int nvmtl_vk_initialize(void)
     VkQueueFamilyProperties qf[16]; if (qn > 16) qn = 16; pvkGetPhysicalDeviceQueueFamilyProperties(g_pdev, &qn, qf);
     for (uint32_t i = 0; i < qn; i++)
         if ((qf[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) && (qf[i].queueFlags & VK_QUEUE_COMPUTE_BIT)) { g_qfam = i; g_qsparse = (qf[i].queueFlags & VK_QUEUE_SPARSE_BINDING_BIT) != 0; break; }
-    if (g_qfam == UINT32_MAX) { nvlog("vk: no graphics+compute queue family"); return -1; }
+    if (g_qfam == UINT32_MAX) { nvlog("vk: no graphics+compute queue family - NVK FAILED"); return -1; }
     g_timestamp_bits = qf[g_qfam].timestampValidBits;
 
     float prio = 1.0f;
@@ -768,7 +799,7 @@ static int nvmtl_vk_initialize(void)
               g_bindless ? "ON (set 2)" : "OFF");
     }
     VkPhysicalDeviceFeatures supported; pvkGetPhysicalDeviceFeatures(g_pdev, &supported);
-    if (!supported.shaderInt64) { nvlog("vk: 64-bit shader addresses unavailable"); return -1; }
+    if (!supported.shaderInt64) { nvlog("vk: 64-bit shader addresses unavailable - NVK FAILED"); return -1; }
     VkPhysicalDeviceFeatures enabled = {0}; enabled.shaderInt64 = VK_TRUE;
     enabled.sampleRateShading = supported.sampleRateShading;
     enabled.occlusionQueryPrecise = supported.occlusionQueryPrecise;
@@ -888,7 +919,18 @@ static int nvmtl_vk_initialize(void)
     return 0;
 }
 static pthread_once_t g_vk_once = PTHREAD_ONCE_INIT;
-static void nvmtl_vk_initialize_once(void) { (void)nvmtl_vk_initialize(); }
+static void nvmtl_vk_initialize_once(void)
+{
+#if defined(NVMTL_RELEASE) && NVMTL_RELEASE
+    atomic_store(&g_vk_bringup, 1);
+    int rc = nvmtl_vk_initialize();
+    atomic_store(&g_vk_bringup, 0);
+    if (rc) nvmtl_vk_release_errors_flush();
+    else { pthread_mutex_lock(&g_vk_held_lock); g_vk_heldn = 0; pthread_mutex_unlock(&g_vk_held_lock); }
+#else
+    (void)nvmtl_vk_initialize();
+#endif
+}
 int nvmtl_vk_init(void) {
     pthread_once(&g_vk_once, nvmtl_vk_initialize_once);
     return g_state == 1 ? 0 : -1;
