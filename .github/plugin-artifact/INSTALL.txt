@@ -7,7 +7,8 @@ NVMTLDriver        el plugin CON el cambio. Solo actua en los procesos GPU de Ch
                    (Brave, Chrome, Edge, Discord, VS Code...: los que arrancan con --type=gpu-process).
                    Ahi hace dos cosas:
                    - quita el bloqueo de ANGLE a Metal en las NVIDIA (disableMetalOnNvidia), asi que
-                     ya no hace falta --disable-angle-features;
+                     ya no hace falta --disable-angle-features, y apaga dos funciones de ANGLE
+                     (emulateAlphaToCoverage y generateShareableShaders) que tumbaban WebGL;
                    - al terminar cada cuadro, copia a la memoria normal las IOSurface que no son
                      drawables de CAMetalLayer.
                    El escritorio (WindowServer) y todas las demas apps siguen igual que con el
@@ -69,9 +70,9 @@ Paso B: plugin con el cambio
      shasum -a 256 "$B/NVMTLDriver"
 La suma tiene que ser la de NVMTLDriver en SHA256SUMS.
 
-Haz las pruebas B1, B2 y B3 de "Probar Brave" (y B4 si hace falta). En B1 deberia verse la ventana
-de Brave sin --disable-angle-features. En B2 apunta lo que pase: el sandbox de Chromium puede seguir
-impidiendo que Brave use la NVIDIA, y entonces el registro dice por que.
+Haz las pruebas B1 y B2 de "Probar Brave" (y B3 si hace falta). En B1 deberia verse la ventana de
+Brave y el cubo de get.webgl.org, sin ninguna opcion de ANGLE. En B2 apunta lo que pase: el sandbox
+de Chromium puede seguir impidiendo que Brave use la NVIDIA, y entonces el registro dice por que.
 
 Probar Brave
 ------------
@@ -85,13 +86,12 @@ A1 (Paso A), sin sandbox y con la opcion de ANGLE (el base no quita el bloqueo p
      open -a "Brave Browser" --args --disable-gpu-sandbox --disable-angle-features=disableMetalOnNvidia
 B1 (Paso B), sin sandbox y SIN la opcion de ANGLE (eso lo hace ahora el plugin):
      open -a "Brave Browser" --args --disable-gpu-sandbox
-B2 (Paso B), normal, con el sandbox, como al abrirlo desde el Dock:
-     open -a "Brave Browser"
-B3 (Paso B), WebGL: en A1 el cubo de get.webgl.org tumbo el proceso GPU de Brave, porque el
-   traductor de shaders del driver no sabe hacer una funcion que ANGLE mete en todos los shaders de
-   WebGL. Con estas dos opciones ANGLE deja de meterla:
-     open -a "Brave Browser" --args --disable-gpu-sandbox --disable-angle-features=emulateAlphaToCoverage,generateShareableShaders
-B4 (Paso B), solo si en B1 "Display type" no dice ANGLE_METAL: repite B1 con la opcion de ANGLE:
+B2 (Paso B), con el sandbox, como al abrirlo desde el Dock, pero pidiendo a Brave que registre lo
+   que el sandbox le bloquea:
+     open -a "Brave Browser" --args --enable-sandbox-logging
+   Despues de B2 guarda tambien lo que bloqueo el sandbox:
+     sudo log show --last 15m --style compact --predicate 'eventMessage CONTAINS "Brave Browser Helper" AND eventMessage CONTAINS "deny("' > ~/Desktop/sandbox-B2.txt
+B3 (Paso B), solo si en B1 "Display type" no dice ANGLE_METAL: repite B1 con la opcion de ANGLE:
      open -a "Brave Browser" --args --disable-gpu-sandbox --disable-angle-features=disableMetalOnNvidia
    Si asi sale ANGLE_METAL, el fallo esta en como el plugin quita el bloqueo de ANGLE.
 Sin sandbox es solo para probar.
@@ -129,8 +129,8 @@ Con la linea NVMTL_SURFACE_COPYOUT en /Library/GPUBundles/nvmtl/nvrm610.conf:
 Sin esa linea actua en los procesos GPU de Chromium y Electron. En el escritorio (WindowServer) no
 actua nunca. Donde actua hace las dos cosas: quita el bloqueo de ANGLE y copia las IOSurface.
 
-Con NVMTL_ANGLE_ALLOW=0 en el mismo archivo, sigue copiando pero ANGLE vuelve a negarse a usar
-Metal en la NVIDIA, como con el plugin oficial.
+Con NVMTL_ANGLE_ALLOW=0 en el mismo archivo, sigue copiando pero ANGLE vuelve a sus valores de
+siempre: se niega a usar Metal en la NVIDIA, como con el plugin oficial.
 
 Poner o cambiar un valor. Solo vale la primera linea de cada nombre, asi que primero se borra la
 que hubiera (cambia el 0 por lo que quieras):

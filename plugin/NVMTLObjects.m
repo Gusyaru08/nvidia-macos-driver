@@ -115,34 +115,45 @@ static BOOL nvmtl_browser_gpu_process(void)
 // ANGLE (Chromium, Electron, CEF and WebKit) refuses its Metal back end on vendor 0x10de through the disableMetalOnNvidia
 // feature, which exists for Apple's old NVIDIA drivers. ANGLE reads ANGLE_FEATURE_OVERRIDES_DISABLED with getenv in
 // DisplayMtl::initializeFeatures(), after creating its MTLDevice has loaded this bundle, and checks the gate after
-// that, so adding the feature here lifts the gate in the process that is about to use this device. Only the processes
-// that also copy IOSurfaces out get it: ANGLE on this device with VRAM-only publication left browser windows blank,
-// and with NVMTL_SURFACE_COPYOUT=0 the plugin then behaves like the official one again. NVMTL_ANGLE_ALLOW=0 in
-// nvrm610.conf keeps ANGLE's refusal. Child processes inherit the variable; a browser GPU process starts none.
+// that, so adding the feature here lifts the gate in the process that is about to use this device. Two more features
+// go with it: ANGLE's alpha-to-coverage emulation (on for every non-Apple GPU) and its shareable shaders put a
+// get_num_samples() call into every WebGL fragment shader. The shipped translator cannot lower that call without the
+// pipeline's sample count, which a function-constant re-translation does not have, so WebGL failed and took Brave's
+// GPU process down on get.webgl.org. With both off ANGLE emits no such call and uses Metal's own alpha-to-coverage,
+// which the plugin passes to Vulkan. Only the processes that also copy IOSurfaces out get any of this: ANGLE on this
+// device with VRAM-only publication left browser windows blank, and with NVMTL_SURFACE_COPYOUT=0 the plugin then
+// behaves like the official one again. NVMTL_ANGLE_ALLOW=0 in nvrm610.conf keeps ANGLE's defaults (and its refusal).
+// Child processes inherit the variable; a browser GPU process starts none.
+static BOOL nvmtl_angle_listed(const char *list, const char *feat)
+{
+    const size_t fl = strlen(feat);
+    for (const char *p = list; (p = strstr(p, feat)); p += fl)
+        if ((p == list || p[-1] == ':') && (p[fl] == 0 || p[fl] == ':')) return YES;
+    return NO;
+}
 static void nvmtl_angle_allow(void)
 {
     if (!nvmtl_browser_gpu_process()) return;
     const char *me = getprogname();
     const char *k = getenv("NVMTL_ANGLE_ALLOW");
     if (k && k[0] == '0') { nvmtl_note("browser GPU process %s: ANGLE keeps refusing Metal on NVIDIA (NVMTL_ANGLE_ALLOW=0)", me); return; }
-    static const char feat[] = "disableMetalOnNvidia";
-    const size_t fl = sizeof feat - 1;
+    static const char *const feats[] = { "disableMetalOnNvidia", "emulateAlphaToCoverage", "generateShareableShaders" };
     const char *cur = getenv("ANGLE_FEATURE_OVERRIDES_DISABLED");
-    BOOL listed = NO;
+    char buf[1024]; size_t n = 0; buf[0] = 0;
     if (cur && *cur) {
-        for (const char *p = cur; !listed && (p = strstr(p, feat)); p += fl)
-            listed = (p == cur || p[-1] == ':') && (p[fl] == 0 || p[fl] == ':');
-        if (!listed) {
-            char buf[1024];
-            int n = snprintf(buf, sizeof buf, "%s:%s", cur, feat);
-            if (n <= 0 || (size_t)n >= sizeof buf) { nvmtl_note("browser GPU process %s: ANGLE_FEATURE_OVERRIDES_DISABLED is too long - ANGLE's NVIDIA gate NOT lifted", me); return; }
-            setenv("ANGLE_FEATURE_OVERRIDES_DISABLED", buf, 1);
-        }
-    } else {
-        setenv("ANGLE_FEATURE_OVERRIDES_DISABLED", feat, 1);
+        int w = snprintf(buf, sizeof buf, "%s", cur);
+        if (w < 0 || (size_t)w >= sizeof buf) { nvmtl_note("browser GPU process %s: ANGLE_FEATURE_OVERRIDES_DISABLED is too long - ANGLE's NVIDIA gate NOT lifted", me); return; }
+        n = (size_t)w;
     }
-    nvmtl_note("browser GPU process %s: ANGLE may use Metal on NVIDIA (%s in ANGLE_FEATURE_OVERRIDES_DISABLED%s)", me, feat,
-               listed ? ", already there" : "");
+    unsigned added = 0;
+    for (size_t i = 0; i < sizeof feats / sizeof *feats; i++) {
+        if (nvmtl_angle_listed(buf, feats[i])) continue;
+        int w = snprintf(buf + n, sizeof buf - n, "%s%s", n ? ":" : "", feats[i]);
+        if (w < 0 || (size_t)w >= sizeof buf - n) { nvmtl_note("browser GPU process %s: ANGLE_FEATURE_OVERRIDES_DISABLED is too long - ANGLE's NVIDIA gate NOT lifted", me); return; }
+        n += (size_t)w; added++;
+    }
+    if (added) setenv("ANGLE_FEATURE_OVERRIDES_DISABLED", buf, 1);
+    nvmtl_note("browser GPU process %s: ANGLE may use Metal on NVIDIA (ANGLE_FEATURE_OVERRIDES_DISABLED=%s)", me, buf);
 }
 __attribute__((constructor)) static void nvmtl_conf_knobs(void)
 {
