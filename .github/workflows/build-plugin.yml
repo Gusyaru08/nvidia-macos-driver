@@ -1,7 +1,7 @@
 name: Build Metal plugin
 
 # Builds the Metal plugin (NVMTLDriver) the way build/build_plugin.sh does, in release mode, for macOS 15 x86_64.
-# Two binaries come out: this branch's plugin and an unmodified build of the 1.13.0 release it is based on, so a
+# Two binaries come out: this branch's plugin and an unmodified build of the 1.14.2 release it is based on, so a
 # self-built plugin can be checked on its own before the change is tried. The plugin calls into NVK internals, so the
 # branch must sit on top of that release.
 
@@ -31,8 +31,8 @@ jobs:
     runs-on: macos-15
     env:
       VULKAN_HEADERS_TAG: v1.4.341
-      DRIVER_VERSION: 1.13.0
-      BASE_COMMIT: 0960b2ef5dbc4a573056d4c8e042a5bd2e15d651   # "Driver and Mac app 1.13.0"
+      DRIVER_VERSION: 1.14.2
+      BASE_COMMIT: 1083a98db33a0bb824290556de255f9a95ca5403   # "Driver and Mac app 1.14.2"
       SRC_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
       - uses: actions/checkout@v4

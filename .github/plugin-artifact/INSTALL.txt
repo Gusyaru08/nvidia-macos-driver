@@ -1,4 +1,4 @@
-Plugin Metal de prueba (NVMTLDriver) - driver NullMoth 1.13.0, macOS 15, x86_64
+Plugin Metal de prueba (NVMTLDriver) - driver NullMoth 1.14.2, macOS 15, x86_64
 ================================================================================
 
 Archivos
@@ -13,14 +13,14 @@ NVMTLDriver        el plugin CON el cambio. Solo actua en los procesos GPU de Ch
                      drawables de CAMetalLayer.
                    El escritorio (WindowServer) y todas las demas apps siguen igual que con el
                    plugin oficial.
-NVMTLDriver-base   el plugin 1.13.0 SIN el cambio, compilado aqui igual que el otro. Sirve para
+NVMTLDriver-base   el plugin 1.14.2 SIN el cambio, compilado aqui igual que el otro. Sirve para
                    comprobar que un plugin compilado aqui funciona antes de probar el cambio.
 SHA256SUMS         sumas de verificacion.
 BUILD.txt          de que codigo sale cada archivo.
 
-Solo sirve con el driver 1.13.0 (el plugin usa funciones internas de su NVK). Compruebalo:
+Solo sirve con el driver 1.14.2 (el plugin usa funciones internas de su NVK). Compruebalo:
      sudo cat /Library/NullMoth/driver-version
-Tiene que decir 1.13.0. Cuando la app 1401 actualice o reinstale el driver, este plugin se
+Tiene que decir 1.14.2. Cuando la app 1401 actualice o reinstale el driver, este plugin se
 reemplaza solo por el oficial.
 
 Si algo sale mal
@@ -30,14 +30,15 @@ Si algo sale mal
   pregunte (en ingles, "Press Y to remove it..."), pulsa Y: cualquier otra tecla, Enter incluido,
   o esperar 60 s no cambia nada. Luego elige tu disco de macOS: arranca sin el driver, lo quita
   entero, deja el Mac como antes de instalarlo (config de OpenCore incluida) y reinicia solo.
-  Despues reinstala el driver 1.13.0 con la app 1401: eso vuelve a poner el plugin oficial.
+  Despues reinstala el driver 1.14.2 con la app 1401: eso vuelve a poner el plugin oficial.
 
-Preparar (una sola vez)
------------------------
-1. Respaldo del plugin oficial. Hazlo ANTES de instalar nada y no lo repitas despues (copiarias
-   el de prueba encima del respaldo):
-     sudo ditto /Library/GPUBundles/NVMTLDriver.bundle /Users/Shared/NVMTLDriver.bundle.respaldo
-     shasum -a 256 /Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/NVMTLDriver /Users/Shared/NVMTLDriver.bundle.respaldo/Contents/MacOS/NVMTLDriver
+Preparar (una vez por version del driver)
+-----------------------------------------
+1. Respaldo del plugin oficial 1.14.2. Hazlo ANTES de instalar nada de aqui y no lo repitas
+   despues (copiarias el de prueba encima del respaldo). Un respaldo de otra version (por ejemplo
+   el de 1.13.0) no sirve: no lo pongas nunca sobre 1.14.2.
+     sudo ditto /Library/GPUBundles/NVMTLDriver.bundle /Users/Shared/NVMTLDriver-1.14.2.respaldo
+     shasum -a 256 /Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/NVMTLDriver /Users/Shared/NVMTLDriver-1.14.2.respaldo/Contents/MacOS/NVMTLDriver
    Las dos sumas tienen que ser iguales. Si no, no sigas.
 
 2. En Terminal, entra en la carpeta donde descomprimiste esto (cd ...) y ejecuta:
@@ -55,8 +56,8 @@ Paso A: plugin base (sin el cambio)
      shasum -a 256 "$B/NVMTLDriver"
 La suma tiene que ser la de NVMTLDriver-base en SHA256SUMS.
 
-Haz la prueba A1 de "Probar Brave". Con el base tiene que salir IGUAL que antes: ventana vacia.
-Eso es lo esperado. Luego reinicia y comprueba que el escritorio y tus apps van bien.
+Haz la prueba A1 de "Probar Brave". Asi se ve lo que hace 1.14.2 sin el cambio: apunta lo mismo
+que en las demas pruebas. Luego reinicia y comprueba que el escritorio y tus apps van bien.
 Si algo va mal ya con el base, para aqui, vuelve al plugin original y avisa: el problema seria
 la compilacion, no el cambio.
 
@@ -70,9 +71,8 @@ Paso B: plugin con el cambio
      shasum -a 256 "$B/NVMTLDriver"
 La suma tiene que ser la de NVMTLDriver en SHA256SUMS.
 
-Haz las pruebas B1 y B2 de "Probar Brave" (y B3 si hace falta). En B1 deberia verse la ventana de
-Brave y el cubo de get.webgl.org, sin ninguna opcion de ANGLE. En B2 apunta lo que pase: el sandbox
-de Chromium puede seguir impidiendo que Brave use la NVIDIA, y entonces el registro dice por que.
+Haz las pruebas B1 y B2 de "Probar Brave" (y B3 si hace falta). En las dos deberia verse la ventana
+de Brave y el cubo de get.webgl.org, sin ninguna opcion de ANGLE.
 
 Probar Brave
 ------------
@@ -82,22 +82,23 @@ sesion. Brave arranca su proceso GPU de cero, asi que basta con cerrarlo del tod
 prueba:
      pkill -x "Brave Browser"; while pgrep -x "Brave Browser" >/dev/null; do sleep 1; done
 
-A1 (Paso A), sin sandbox y con la opcion de ANGLE (el base no quita el bloqueo por si solo):
-     open -a "Brave Browser" --args --disable-gpu-sandbox --disable-angle-features=disableMetalOnNvidia
-B1 (Paso B), sin sandbox y SIN la opcion de ANGLE (eso lo hace ahora el plugin):
+A1 (Paso A), sin sandbox y con las opciones de ANGLE (el base no las pone por si solo):
+     open -a "Brave Browser" --args --disable-gpu-sandbox --disable-angle-features=disableMetalOnNvidia,emulateAlphaToCoverage,generateShareableShaders
+B1 (Paso B), sin sandbox y SIN opciones de ANGLE (eso lo hace ahora el plugin), con el motor de
+   dibujo que Brave usa por defecto (Skia Graphite):
      open -a "Brave Browser" --args --disable-gpu-sandbox
-B2 (Paso B), con el sandbox, como al abrirlo desde el Dock, pero pidiendo a Brave que registre lo
-   que el sandbox le bloquea:
-     open -a "Brave Browser" --args --enable-sandbox-logging
-   Despues de B2 guarda tambien lo que bloqueo el sandbox:
-     sudo log show --last 15m --style compact --predicate 'eventMessage CONTAINS "Brave Browser Helper" AND eventMessage CONTAINS "deny("' > ~/Desktop/sandbox-B2.txt
+B2 (Paso B), igual que B1 pero con Graphite apagado (Brave dibuja con Ganesh sobre ANGLE):
+     open -a "Brave Browser" --args --disable-gpu-sandbox --disable-features=SkiaGraphite
 B3 (Paso B), solo si en B1 "Display type" no dice ANGLE_METAL: repite B1 con la opcion de ANGLE:
      open -a "Brave Browser" --args --disable-gpu-sandbox --disable-angle-features=disableMetalOnNvidia
    Si asi sale ANGLE_METAL, el fallo esta en como el plugin quita el bloqueo de ANGLE.
-Sin sandbox es solo para probar.
+Sin sandbox es solo para probar. Con el sandbox de Chromium, Brave no puede cargar el driver (su
+sandbox deja leer /Library/GPUBundles pero no cargar codigo de ahi) y dibuja por software.
 
 En cada prueba, en este orden:
-- apunta si se ve la ventana de Brave y si se ve bien al usarla (pestanas, una pagina normal);
+- apunta si se ve la ventana de Brave y si se ve bien al usarla: barra de pestanas oscura con el
+  tema oscuro, botones de la ventana, flechas e iconos de la barra, nombres de los marcadores, y si
+  algo parpadea;
 - abre brave://gpu y guarda la pagina con su boton, o apunta "Display type" (deberia decir
   ANGLE_METAL) y "GL_RENDERER" (deberia nombrar ANGLE Metal Renderer y la RTX 3050);
 - al final abre get.webgl.org y apunta si sale el cubo o un aviso de que WebGL fallo.
@@ -107,14 +108,13 @@ por la prueba que sea; recoge los ultimos 15 minutos):
      sudo log show --last 15m --style compact --predicate 'eventMessage CONTAINS "NullMoth"' > ~/Desktop/nullmoth-A1.txt
 Manda esos archivos tal cual. Con el plugin del Paso B, cada proceso GPU de Brave escribe ahi
 lineas "browser GPU process ..." que dicen si quito el bloqueo de ANGLE, si copia las IOSurface y
-si la VRAM de las IOSurface se comparte entre procesos. Si el proceso no consigue la NVIDIA (lo
-normal en B2 hasta ahora), salen lineas con "FAILED", "REFUSING" o "no device" que dicen por que;
-por ejemplo "NVRM probe: ... not permitted" si el sandbox de Chromium lo bloquea.
+si la VRAM de las IOSurface se comparte entre procesos. Si el proceso no consigue la NVIDIA, salen
+lineas con "FAILED", "REFUSING" o "no device" que dicen por que.
 
 Volver al plugin original
 -------------------------
      B=/Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS
-     sudo cp /Users/Shared/NVMTLDriver.bundle.respaldo/Contents/MacOS/NVMTLDriver "$B/NVMTLDriver.new"
+     sudo cp /Users/Shared/NVMTLDriver-1.14.2.respaldo/Contents/MacOS/NVMTLDriver "$B/NVMTLDriver.new"
      sudo chown root:wheel "$B/NVMTLDriver.new"
      sudo chmod 755 "$B/NVMTLDriver.new"
      sudo mv "$B/NVMTLDriver.new" "$B/NVMTLDriver"
