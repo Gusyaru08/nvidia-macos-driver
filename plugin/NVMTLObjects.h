@@ -45,6 +45,7 @@ static inline void *nvmtl_buf_cpu(NVMTLBuffer *b) { nvmtl_buf_settle(b); return 
   uint32_t _baseSlice, _baseLevel;
   uint32_t _surfSeed, _surfGen; BOOL _surfSynced, _surfOwned;
   nvk_buffer _vramBuf; BOOL _vramOn;
+  BOOL _drawable;   // presented through presentDrawable at least once (a CAMetalLayer drawable)
   BOOL _stex;
   uint64_t _resid;
   NSUInteger _usage;

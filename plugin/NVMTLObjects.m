@@ -76,6 +76,85 @@ static _Atomic uint64_t gRes2Tick;
 static void nvmtl_res2_note_use(NVMTLTexture *t);
 static uint64_t nvmtl_res2_evict(uint64_t want);
 extern uint64_t (*nvmtl_res2_evict_hook)(uint64_t want);
+// One line that reaches the system log in release builds too, whose nvlog keeps failures only. What the plugin does in
+// a browser GPU process is otherwise missing from the logs a tester sends.
+static void nvmtl_note(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+static void nvmtl_note(const char *fmt, ...)
+{
+    char b[512]; va_list a; va_start(a, fmt); vsnprintf(b, sizeof b, fmt, a); va_end(a);
+#if NVMTL_RELEASE
+    syslog(LOG_NOTICE, "NullMoth: %s", b);
+#else
+    nvlog("note: %s", b);
+#endif
+}
+// A Chromium-family GPU process (Chrome, Brave, Edge, Electron, CEF) is started with --type=gpu-process. Its name does
+// not say so: Chromium runs it from "<App> Helper (GPU)" only while SwiftShader is allowed, otherwise from the plain
+// "<App> Helper" that utility processes share (seen with Brave on Chromium 155: "Brave Browser Helper").
+#include <crt_externs.h>
+static BOOL nvmtl_chromium_gpu_process(void)
+{
+    char ***argv = _NSGetArgv(); int *argc = _NSGetArgc();
+    if (!argv || !*argv || !argc) return NO;
+    for (int i = 1; i < *argc; i++)
+        if ((*argv)[i] && !strcmp((*argv)[i], "--type=gpu-process")) return YES;
+    return NO;
+}
+// The processes the browser GPU changes apply to (IOSurface copy-out and lifting ANGLE's NVIDIA gate), chosen by
+// NVMTL_SURFACE_COPYOUT in nvrm610.conf (the environment only outside release builds): unset = Chromium-family GPU
+// processes (--type=gpu-process, or a name containing "Helper (GPU)"), 0 = none, all = every process, any other text =
+// names containing it. WindowServer is never one of them; it still copies out exactly where the official plugin does.
+static BOOL nvmtl_browser_gpu_process(void)
+{
+    const char *me = getprogname(), *e = getenv("NVMTL_SURFACE_COPYOUT");
+    if (!me || !strcmp(me, "WindowServer")) return NO;
+    if (!e || !*e) return strstr(me, "Helper (GPU)") || nvmtl_chromium_gpu_process();
+    if (!strcmp(e, "0")) return NO;
+    return !strcmp(e, "all") || strstr(me, e);
+}
+// ANGLE (Chromium, Electron, CEF and WebKit) refuses its Metal back end on vendor 0x10de through the disableMetalOnNvidia
+// feature, which exists for Apple's old NVIDIA drivers. ANGLE reads ANGLE_FEATURE_OVERRIDES_DISABLED with getenv in
+// DisplayMtl::initializeFeatures(), after creating its MTLDevice has loaded this bundle, and checks the gate after
+// that, so adding the feature here lifts the gate in the process that is about to use this device. Two more features
+// go with it: ANGLE's alpha-to-coverage emulation (on for every non-Apple GPU) and its shareable shaders put a
+// get_num_samples() call into every WebGL fragment shader. Up to 1.13 the translator could not lower that call, and
+// WebGL took Brave's GPU process down on get.webgl.org. Since 1.14 it lowers it as one sample, because the plugin never
+// names the pipeline's count, so the emulation computes a single-sample mask on a 4x antialiased WebGL canvas. With
+// both off ANGLE emits no such call and uses Metal's own alpha-to-coverage, which the plugin passes to Vulkan. Only the processes that also copy IOSurfaces out get any of this: ANGLE on this
+// device with VRAM-only publication left browser windows blank, and with NVMTL_SURFACE_COPYOUT=0 the plugin then
+// behaves like the official one again. NVMTL_ANGLE_ALLOW=0 in nvrm610.conf keeps ANGLE's defaults (and its refusal).
+// Child processes inherit the variable; a browser GPU process starts none.
+static BOOL nvmtl_angle_listed(const char *list, const char *feat)
+{
+    const size_t fl = strlen(feat);
+    for (const char *p = list; (p = strstr(p, feat)); p += fl)
+        if ((p == list || p[-1] == ':') && (p[fl] == 0 || p[fl] == ':')) return YES;
+    return NO;
+}
+static void nvmtl_angle_allow(void)
+{
+    if (!nvmtl_browser_gpu_process()) return;
+    const char *me = getprogname();
+    const char *k = getenv("NVMTL_ANGLE_ALLOW");
+    if (k && k[0] == '0') { nvmtl_note("browser GPU process %s: ANGLE keeps refusing Metal on NVIDIA (NVMTL_ANGLE_ALLOW=0)", me); return; }
+    static const char *const feats[] = { "disableMetalOnNvidia", "emulateAlphaToCoverage", "generateShareableShaders" };
+    const char *cur = getenv("ANGLE_FEATURE_OVERRIDES_DISABLED");
+    char buf[1024]; size_t n = 0; buf[0] = 0;
+    if (cur && *cur) {
+        int w = snprintf(buf, sizeof buf, "%s", cur);
+        if (w < 0 || (size_t)w >= sizeof buf) { nvmtl_note("browser GPU process %s: ANGLE_FEATURE_OVERRIDES_DISABLED is too long - ANGLE's NVIDIA gate NOT lifted", me); return; }
+        n = (size_t)w;
+    }
+    unsigned added = 0;
+    for (size_t i = 0; i < sizeof feats / sizeof *feats; i++) {
+        if (nvmtl_angle_listed(buf, feats[i])) continue;
+        int w = snprintf(buf + n, sizeof buf - n, "%s%s", n ? ":" : "", feats[i]);
+        if (w < 0 || (size_t)w >= sizeof buf - n) { nvmtl_note("browser GPU process %s: ANGLE_FEATURE_OVERRIDES_DISABLED is too long - ANGLE's NVIDIA gate NOT lifted", me); return; }
+        n += (size_t)w; added++;
+    }
+    if (added) setenv("ANGLE_FEATURE_OVERRIDES_DISABLED", buf, 1);
+    nvmtl_note("browser GPU process %s: ANGLE may use Metal on NVIDIA (ANGLE_FEATURE_OVERRIDES_DISABLED=%s)", me, buf);
+}
 __attribute__((constructor)) static void nvmtl_conf_knobs(void)
 {
 #if NVMTL_RELEASE
@@ -98,7 +177,7 @@ __attribute__((constructor)) static void nvmtl_conf_knobs(void)
       unsetenv("NVMTL_CONF_SET"); }
     char recbuf[2048]; size_t recn = 0; recbuf[0] = 0;
     FILE *f = fopen("/Library/GPUBundles/nvmtl/nvrm610.conf", "r");
-    if (!f) { if (forgot) nvlog("conf: forgot %u inherited knob(s); no conf file", forgot); return; }
+    if (!f) { if (forgot) nvlog("conf: forgot %u inherited knob(s); no conf file", forgot); nvmtl_angle_allow(); return; }
     char line[512];
     unsigned took = 0;
     while (fgets(line, sizeof line, f)) {
@@ -122,6 +201,7 @@ __attribute__((constructor)) static void nvmtl_conf_knobs(void)
     fclose(f);
     if (recn) setenv("NVMTL_CONF_SET", recbuf, 1);
     if (took || forgot) nvlog("conf: %u knob(s) read from /Library/GPUBundles/nvmtl/nvrm610.conf, %u inherited conf knob(s) forgotten first (the environment still wins)", took, forgot);
+    nvmtl_angle_allow();
 }
 static int nvmtl_dontcare_clears(void) {
     static int on = -1;
@@ -1166,26 +1246,52 @@ void nvmtl_texture_desc_swizzle(NVMTLTexture *t, MTLTextureDescriptor *d) {
     g_surfin_copy++; if (r->_vramOn) nvmtl_vram_tag_set(r->_surf, r->_plane, seed);
     static unsigned n; if (n++ < 6 || n % 2000 == 0) nvlog("G13 surface-in #%u: %ux%u surface %p seed %u uploaded", n, r->_i.w, r->_i.h, (void *)r->_surf, seed);
 }
+// VRAM-only publication: the kernel marks the surface's VRAM newest and pages it off on the next CPU lock.
+- (BOOL)nvmtlSurfacePublishVram {
+    if (nvmtl_vk_surface_dirty((uint32_t)IOSurfaceGetID(_surf), (uint32_t)_plane)) return NO;
+    uint32_t seed = IOSurfaceGetSeed(_surf);
+    _surfSeed = seed; _surfSynced = YES;
+    _surfGen = nvmtl_vram_tag_bump(_surf, _plane, seed);
+    static unsigned nd; if (nd++ < 6 || nd % 5000 == 0) nvlog("surface-out -> dirty, no copy (%ux%u surface %u seed %u, #%u)", _i.w, _i.h, (unsigned)IOSurfaceGetID(_surf), seed, nd);
+    return YES;
+}
 - (BOOL)nvmtlSurfaceOut {
     NVMTLTexture *r = _parent ? _parent : self;
     if (!r->_surf) return YES;
     if (![r nvmtlSurfaceCopyable]) return NO;
-    if (r->_vramOn && !nvmtl_vk_surface_dirty((uint32_t)IOSurfaceGetID(r->_surf), (uint32_t)r->_plane)) {
-        uint32_t seed = IOSurfaceGetSeed(r->_surf);
-        r->_surfSeed = seed; r->_surfSynced = YES;
-        r->_surfGen = nvmtl_vram_tag_bump(r->_surf, r->_plane, seed);
-        static unsigned nd; if (nd++ < 6 || nd % 5000 == 0) nvlog("surface-out -> dirty, no copy (%ux%u surface %u seed %u, #%u)", r->_i.w, r->_i.h, (unsigned)IOSurfaceGetID(r->_surf), seed, nd);
-        return YES;
-    }
+    // VRAM-only publication (no system-memory copy, no seed change) is enough for a CAMetalLayer drawable, because
+    // presentDrawable tells CoreAnimation about every frame, and for everything WindowServer draws itself. In a browser
+    // GPU process the other IOSurfaces reach WindowServer as CALayer contents (the Chromium compositor and its WebGL
+    // buffers) and showed up blank, so in the processes nvmtl_browser_gpu_process() picks they take the copy-out below,
+    // which also keeps the shared-VRAM tag in step.
+    static BOOL copyOut;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        const char *me = getprogname();
+        copyOut = nvmtl_browser_gpu_process();
+        if (copyOut)
+            nvmtl_note("browser GPU process %s: IOSurfaces that are not presented drawables are copied to system memory after each GPU write (%s)",
+                       me ? me : "?", nvmtl_vk_surface_share_on() ? "IOSurface textures share the surface's VRAM across processes"
+                       : "IOSurface textures are private per process, e.g. on a headless GPU, and the official plugin already copies them all out");
+        else nvlog("surface-out: IOSurfaces may stay VRAM-only in %s", me ? me : "?");
+    });
+    const BOOL vramOnly = r->_vramOn && (!copyOut || r->_drawable);
+    if (vramOnly && [r nvmtlSurfacePublishVram]) return YES;
+    // a failed copy-out where VRAM-only publication was the old behaviour falls back to it rather than failing the command buffer
+    const BOOL fallback = r->_vramOn && !vramOnly;
     uint64_t t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
     uint32_t lockopt = nvmtl_noseed() ? kIOSurfaceLockReadOnly : 0;
-    if (IOSurfaceLock(r->_surf, lockopt, NULL) != kIOReturnSuccess) { nvlog("G13 surface-out: IOSurfaceLock FAILED"); return NO; }
+    // The GPU write has finished, so the family VRAM holds this frame and system memory does not yet. Say so before the
+    // readback: otherwise a process that samples the surface meanwhile finds no current tag and uploads the stale system
+    // memory over the frame in VRAM (VRAM-only publication tagged it at once; the readback takes milliseconds).
+    if (copyOut && r->_vramOn && !lockopt) nvmtl_vram_tag_set(r->_surf, r->_plane, IOSurfaceGetSeed(r->_surf));
+    if (IOSurfaceLock(r->_surf, lockopt, NULL) != kIOReturnSuccess) { nvlog("G13 surface-out: IOSurfaceLock FAILED"); return fallback && [r nvmtlSurfacePublishVram]; }
     void *base = IOSurfaceGetBaseAddressOfPlane(r->_surf, (uint32_t)r->_plane);
     size_t row = IOSurfaceGetBytesPerRowOfPlane(r->_surf, (uint32_t)r->_plane);
     int rc = (base && row) ? nvmtl_vk_image_read(r->_q, &r->_i, base, row) : -1;
     if (!rc && r->_i.bpp == 4) { char tag[24]; snprintf(tag, sizeof tag, "out%u-", (unsigned)IOSurfaceGetID(r->_surf)); nvmtl_frame_dump(tag, base, row, r->_i.w, r->_i.h); }
     uint32_t seed = 0; IOReturn unlocked = IOSurfaceUnlock(r->_surf, lockopt, &seed); if (lockopt) seed = IOSurfaceGetSeed(r->_surf);
-    if (rc || unlocked != kIOReturnSuccess) { nvlog("G13 surface-out: readback FAILED (%ux%u)", r->_i.w, r->_i.h); return NO; }
+    if (rc || unlocked != kIOReturnSuccess) { nvlog("G13 surface-out: readback FAILED (%ux%u)", r->_i.w, r->_i.h); return fallback && [r nvmtlSurfacePublishVram]; }
     r->_surfSeed = seed; r->_surfSynced = YES;
     r->_surfGen = r->_vramOn ? r->_surfGen : nvmtl_vram_gen(r->_surf, r->_plane);
     if (r->_vramOn && !lockopt) nvmtl_vram_tag_set(r->_surf, r->_plane, seed);
@@ -4680,7 +4786,10 @@ destinationBytesPerImage:(NSUInteger)img options:(MTLBlitOption)opt {
     }
     if ([drawable respondsToSelector:@selector(texture)]) {
         _present = (NVMTLTexture *)[(id<CAMetalDrawable>)drawable texture];
-        nvmtl_surf_dirty(self, _present);
+        if ([(id)_present isKindOfClass:[NVMTLTexture class]]) {
+            (_present->_parent ? _present->_parent : _present)->_drawable = YES;
+            nvmtl_surf_dirty(self, _present);
+        }
     }
     if (!_presentations) _presentations = [NSMutableArray new];
     [_presentations addObject:[action copy]];
