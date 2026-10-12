@@ -4,7 +4,7 @@ Plugin Metal de prueba (NVMTLDriver) - driver NullMoth 1.13.0, macOS 15, x86_64
 Archivos
 --------
 NVMTLDriver        el plugin CON el cambio. Solo actua en los procesos GPU de Chromium y Electron
-                   (Brave, Chrome, Edge, Discord, VS Code...: los que se llaman "... Helper (GPU)").
+                   (Brave, Chrome, Edge, Discord, VS Code...: los que arrancan con --type=gpu-process).
                    Ahi hace dos cosas:
                    - quita el bloqueo de ANGLE a Metal en las NVIDIA (disableMetalOnNvidia), asi que
                      ya no hace falta --disable-angle-features;
@@ -69,9 +69,9 @@ Paso B: plugin con el cambio
      shasum -a 256 "$B/NVMTLDriver"
 La suma tiene que ser la de NVMTLDriver en SHA256SUMS.
 
-Haz las pruebas B1 y B2 de "Probar Brave" (y B3 si hace falta). En B1 deberia verse la ventana de
-Brave y el cubo de get.webgl.org, sin --disable-angle-features. En B2 apunta si se ven: el sandbox
-de Chromium puede seguir impidiendo que Brave use la NVIDIA, y entonces el registro dice por que.
+Haz las pruebas B1, B2 y B3 de "Probar Brave" (y B4 si hace falta). En B1 deberia verse la ventana
+de Brave sin --disable-angle-features. En B2 apunta lo que pase: el sandbox de Chromium puede seguir
+impidiendo que Brave use la NVIDIA, y entonces el registro dice por que.
 
 Probar Brave
 ------------
@@ -87,17 +87,20 @@ B1 (Paso B), sin sandbox y SIN la opcion de ANGLE (eso lo hace ahora el plugin):
      open -a "Brave Browser" --args --disable-gpu-sandbox
 B2 (Paso B), normal, con el sandbox, como al abrirlo desde el Dock:
      open -a "Brave Browser"
-B3 (Paso B), solo si B1 sale en blanco o sin WebGL: repite B1 con la opcion de ANGLE:
+B3 (Paso B), WebGL: en A1 el cubo de get.webgl.org tumbo el proceso GPU de Brave, porque el
+   traductor de shaders del driver no sabe hacer una funcion que ANGLE mete en todos los shaders de
+   WebGL. Con estas dos opciones ANGLE deja de meterla:
+     open -a "Brave Browser" --args --disable-gpu-sandbox --disable-angle-features=emulateAlphaToCoverage,generateShareableShaders
+B4 (Paso B), solo si en B1 "Display type" no dice ANGLE_METAL: repite B1 con la opcion de ANGLE:
      open -a "Brave Browser" --args --disable-gpu-sandbox --disable-angle-features=disableMetalOnNvidia
-   Si asi se ve, el fallo esta en como el plugin quita el bloqueo de ANGLE. Si sigue en blanco,
-   esta en la copia de las IOSurface.
+   Si asi sale ANGLE_METAL, el fallo esta en como el plugin quita el bloqueo de ANGLE.
 Sin sandbox es solo para probar.
 
-En cada prueba apunta:
-- si se ve la ventana de Brave;
-- en brave://gpu: "Display type" (deberia decir ANGLE_METAL) y "GL_RENDERER" (deberia nombrar
-  ANGLE Metal Renderer y la RTX 3050);
-- si get.webgl.org muestra el cubo.
+En cada prueba, en este orden:
+- apunta si se ve la ventana de Brave y si se ve bien al usarla (pestanas, una pagina normal);
+- abre brave://gpu y guarda la pagina con su boton, o apunta "Display type" (deberia decir
+  ANGLE_METAL) y "GL_RENDERER" (deberia nombrar ANGLE Metal Renderer y la RTX 3050);
+- al final abre get.webgl.org y apunta si sale el cubo o un aviso de que WebGL fallo.
 
 Y al terminar cada prueba, antes de empezar la siguiente, guarda el registro del driver (cambia A1
 por la prueba que sea; recoge los ultimos 15 minutos):
@@ -123,8 +126,8 @@ Con la linea NVMTL_SURFACE_COPYOUT en /Library/GPUBundles/nvmtl/nvrm610.conf:
      NVMTL_SURFACE_COPYOUT=0       en ninguna (igual que el plugin oficial)
      NVMTL_SURFACE_COPYOUT=all     en todas las apps (mas lento; solo para probar)
      NVMTL_SURFACE_COPYOUT=texto   en las apps cuyo proceso contiene ese texto
-Sin esa linea actua en los procesos "Helper (GPU)". En el escritorio (WindowServer) no actua
-nunca. Donde actua hace las dos cosas: quita el bloqueo de ANGLE y copia las IOSurface.
+Sin esa linea actua en los procesos GPU de Chromium y Electron. En el escritorio (WindowServer) no
+actua nunca. Donde actua hace las dos cosas: quita el bloqueo de ANGLE y copia las IOSurface.
 
 Con NVMTL_ANGLE_ALLOW=0 en el mismo archivo, sigue copiando pero ANGLE vuelve a negarse a usar
 Metal en la NVIDIA, como con el plugin oficial.

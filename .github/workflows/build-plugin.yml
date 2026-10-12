@@ -109,7 +109,7 @@ jobs:
           M
           done
           echo "== change markers (in the patched build, not in the base)"
-          for pat in "NVMTL_SURFACE_COPYOUT" "NVMTL_ANGLE_ALLOW" "NVRM probe" "browser GPU process %s"; do
+          for pat in "NVMTL_SURFACE_COPYOUT" "NVMTL_ANGLE_ALLOW" "NVRM probe" "browser GPU process %s" "--type=gpu-process"; do
             n=$(strings -a out/NVMTLDriver | grep -c -- "$pat" || true)
             b=$(strings -a out/NVMTLDriver-base | grep -c -- "$pat" || true)
             echo "  $pat: patched $n, base $b"

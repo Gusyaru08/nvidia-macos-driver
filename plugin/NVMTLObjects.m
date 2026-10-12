@@ -88,15 +88,29 @@ static void nvmtl_note(const char *fmt, ...)
     nvlog("note: %s", b);
 #endif
 }
+// A Chromium-family GPU process (Chrome, Brave, Edge, Electron, CEF) is started with --type=gpu-process. Its name does
+// not say so: Chromium runs it from "<App> Helper (GPU)" only while SwiftShader is allowed, otherwise from the plain
+// "<App> Helper" that utility processes share (seen with Brave on Chromium 155: "Brave Browser Helper").
+#include <crt_externs.h>
+static BOOL nvmtl_chromium_gpu_process(void)
+{
+    char ***argv = _NSGetArgv(); int *argc = _NSGetArgc();
+    if (!argv || !*argv || !argc) return NO;
+    for (int i = 1; i < *argc; i++)
+        if ((*argv)[i] && !strcmp((*argv)[i], "--type=gpu-process")) return YES;
+    return NO;
+}
 // The processes the browser GPU changes apply to (IOSurface copy-out and lifting ANGLE's NVIDIA gate), chosen by
-// NVMTL_SURFACE_COPYOUT in nvrm610.conf (the environment only outside release builds): unset = names containing
-// "Helper (GPU)" (Chromium and Electron GPU processes), 0 = none, all = every process, any other text = names
-// containing it. WindowServer is never one of them; it still copies out exactly where 1.13.0 did.
+// NVMTL_SURFACE_COPYOUT in nvrm610.conf (the environment only outside release builds): unset = Chromium-family GPU
+// processes (--type=gpu-process, or a name containing "Helper (GPU)"), 0 = none, all = every process, any other text =
+// names containing it. WindowServer is never one of them; it still copies out exactly where 1.13.0 did.
 static BOOL nvmtl_browser_gpu_process(void)
 {
     const char *me = getprogname(), *e = getenv("NVMTL_SURFACE_COPYOUT");
-    if (!e || !*e) e = "Helper (GPU)";
-    return me && strcmp(me, "WindowServer") && strcmp(e, "0") && (!strcmp(e, "all") || strstr(me, e));
+    if (!me || !strcmp(me, "WindowServer")) return NO;
+    if (!e || !*e) return strstr(me, "Helper (GPU)") || nvmtl_chromium_gpu_process();
+    if (!strcmp(e, "0")) return NO;
+    return !strcmp(e, "all") || strstr(me, e);
 }
 // ANGLE (Chromium, Electron, CEF and WebKit) refuses its Metal back end on vendor 0x10de through the disableMetalOnNvidia
 // feature, which exists for Apple's old NVIDIA drivers. ANGLE reads ANGLE_FEATURE_OVERRIDES_DISABLED with getenv in
